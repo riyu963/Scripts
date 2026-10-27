@@ -63,10 +63,24 @@ Options
   Series and movies with the tag given by --ignore-tag (or SONARR_IGNORE_TAG / RADARR_IGNORE_TAG)
   are left alone.
 
+Batched runs
+  Rather than checking the whole library every time, each run can check a batch of it. Set the
+  batch size with SONARR_RENAME_COUNT / RADARR_RENAME_COUNT (or --count N): each run then checks
+  the next N series or movies, in title order, that haven't been checked yet in this pass through
+  the library. With --apply or --interactive, each one it checks is tagged SONARR_RENAME_TAG /
+  RADARR_RENAME_TAG (or --checked-tag; default rename-checked, created if the arr hasn't got it),
+  so the next run moves on to the next batch. Once the whole library has the tag, the next run
+  takes it off everything and starts a new pass from the top.
+  If a run stops partway, the ones it didn't finish stay untagged and the next run checks them
+  again. Ones left for --interactive are tagged like the rest and come round again next pass.
+  The summary and the Discord post show the progress, e.g. "Checked 50 of 1,234 series; 1,184 left
+  to check, 24 more runs at 50 a run". A dry run never tags. Leave the batch size empty, or set it
+  to 0, to check everything every run.
+
 Several Sonarrs or Radarrs
-  Besides the main one (SONARR_URL, SONARR_API_KEY, SONARR_IGNORE_TAG), you can set up named ones:
-  SONARR_ANIME_URL, SONARR_ANIME_API_KEY and SONARR_ANIME_IGNORE_TAG make one called "anime" (the
-  same for RADARR_..._URL). A run checks every one in turn, main first, then by name, each with its
+  Besides the main one (SONARR_URL, SONARR_API_KEY, SONARR_IGNORE_TAG, SONARR_RENAME_COUNT,
+  SONARR_RENAME_TAG), you can set up named ones: SONARR_ANIME_URL, SONARR_ANIME_API_KEY and so on
+  make one called "anime" (the same for RADARR_..._URL). A run checks every one in turn, main first, then by name, each with its
   own section in the log and its own Discord post; --instance anime (or main) checks just one.
   One that can't start (see below) is skipped, and the others are still checked. A problem once
   renaming has started stops the whole run, so the rest aren't checked either.
@@ -88,7 +102,13 @@ Settings
     RADARR_URL, RADARR_API_KEY    e.g. RADARR_URL=http://192.168.1.10:7878
     SONARR_IGNORE_TAG             optional: leave series with this tag alone (--ignore-tag)
     RADARR_IGNORE_TAG             optional: leave movies with this tag alone (--ignore-tag)
-    SONARR_<NAME>_URL, ..._API_KEY, ..._IGNORE_TAG
+    SONARR_RENAME_COUNT, RADARR_RENAME_COUNT
+                                  optional: the batch size for batched runs, how many each run
+                                  checks (--count; see "Batched runs" above)
+    SONARR_RENAME_TAG, RADARR_RENAME_TAG
+                                  optional: the tag batched runs mark each one checked with
+                                  (--checked-tag; default rename-checked)
+    SONARR_<NAME>_URL, ..._API_KEY, ..._IGNORE_TAG, ..._RENAME_COUNT, ..._RENAME_TAG
                                   optional: another Sonarr, called NAME (the same for RADARR_<NAME>_...;
                                   see "Several Sonarrs or Radarrs" above)
     DISCORD_WEBHOOK_URL           optional: post each run's results to this Discord webhook
@@ -130,6 +150,7 @@ TIMEOUT = 3600  # seconds to wait for an arr command before giving up; giving up
 RETRY = 10      # seconds to wait before trying a failed read from the arr again (once)
 THREADS = 4     # reads at a time while checking: as fast as 10 against a nearby arr, with less load on it
 BUSY = ("queued", "started")
+CHECKED_TAG = "rename-checked"  # what marks one checked in this pass through the library (see "Batched runs")
 FOLDER_FILES = 2  # Discord: files listed under a renamed folder before "… and N more files"
 FILES_ONLY = 13   # Discord: files listed (per list) when only an item's files are renamed (--files or --tba)
 # The differences --ignore-case and --ignore-punctuation can skip: (how the log describes it, the option)
@@ -462,23 +483,21 @@ def root_folders(arr: Arr) -> set:
 
 
 def plan(arr: Arr, kind: Kind, files: str | None = None, ignore_tag: int | None = None, ignore_case: bool = False,
-         ignore_punctuation: bool = False, roots: set | None = None):
+         ignore_punctuation: bool = False, roots: set | None = None, pick=None):
     """Check every item in the arr. Returns four things: what needs renaming (a list of Mismatch),
     the items whose folder isn't on disk, the items skipped because they have the tag `ignore_tag`
     (a tag id), and the paths of every item in lower case. `roots` are the arr's root folders (see
-    check). The arr is read THREADS requests at a time; nothing is changed here, and everything
-    comes back in the items' order."""
+    check). With `pick`, only the items pick(the rest) returns are checked (see "Batched runs"). The arr is
+    read THREADS requests at a time; nothing is changed here, and everything comes back in the items' order."""
     items = sorted(arr.get(f"/api/v3/{kind.items}"), key=lambda i: fold(i.get("sortTitle") or i["title"]))
     windows = next((i["path"] for i in items if "\\" in i["path"] or re.match(r"[A-Za-z]:", i["path"])), None)
     if windows:  # every folder would look missing, as its path isn't split up right
         raise CouldntStart(f"the arr uses Windows paths (like {windows!r}), which aren't supported")
     taken = {fold(i["path"].rstrip("/")) for i in items}
-    ignored, todo = [], []  # todo: (item, its parent folder, its folder name)
-    for item in items:
-        if ignore_tag is not None and ignore_tag in item.get("tags", []):
-            ignored.append(item)
-        else:
-            todo.append((item, *posixpath.split(item["path"].rstrip("/"))))
+    ignored = [item for item in items if ignore_tag is not None and ignore_tag in item.get("tags", [])]
+    rest = [item for item in items if item not in ignored]
+    # (item, its parent folder, its folder name)
+    todo = [(item, *posixpath.split(item["path"].rstrip("/"))) for item in (pick(rest) if pick else rest)]
     with ThreadPoolExecutor(THREADS) as pool:
         parents = list(dict.fromkeys(parent for _, parent, _ in todo))
         listings = dict(zip(parents, pool.map(lambda parent: listing(arr, parent), parents)))
@@ -489,6 +508,12 @@ def plan(arr: Arr, kind: Kind, files: str | None = None, ignore_tag: int | None 
                                            ignore_punctuation, roots), present)
         mismatches = [m for m in checked if m]
     return mismatches, not_on_disk, ignored, taken
+
+
+def retag(arr: Arr, kind: Kind, ids, tag: int, how: str) -> None:
+    """Add (`how` "add") or take off ("remove") tag `tag` on the series or movies `ids`."""
+    if ids:
+        arr.call("PUT", f"/api/v3/{kind.items}/editor", {kind.ids_field: list(ids), "tags": [tag], "applyTags": how})
 
 
 def refresh(arr: Arr, kind: Kind, item_id: int) -> None:
@@ -728,6 +753,12 @@ def main(argv=None) -> int:
                        help="with --apply, also do the renames that need -i (irregular folders, TBA? files)")
         p.add_argument("--ignore-tag", metavar="TAG", help=f"leave {things} with this tag alone, in every instance "
                                                             f"(default: ${var}_IGNORE_TAG, or ${var}_<NAME>_IGNORE_TAG)")
+        p.add_argument("--count", type=int, metavar="N",
+                       help=f"batched runs: check the next N {things} not checked yet in this pass, tagging each one "
+                            f"(default: ${var}_RENAME_COUNT, or ${var}_<NAME>_RENAME_COUNT; 0 or unset: every one)")
+        p.add_argument("--checked-tag", metavar="TAG",
+                       help=f"batched runs: the tag that marks one checked (default: ${var}_RENAME_TAG, or "
+                            f"${var}_<NAME>_RENAME_TAG, or {CHECKED_TAG})")
         p.add_argument("--discord-webhook", default=os.environ.get("DISCORD_WEBHOOK_URL"), metavar="URL",
                        help="post the results to this Discord webhook (default: $DISCORD_WEBHOOK_URL)")
         p.add_argument("--discord-user", default=os.environ.get("DISCORD_USER_ID"), metavar="ID",
@@ -737,6 +768,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     if args.force and not args.apply:
         ap.error("--force only works with --apply")
+    if args.count is not None and args.count < 0:
+        ap.error("--count can't be less than 0")
     if args.discord_user and not args.discord_user.isdigit():
         ap.error(f"the Discord user id must be a number (Copy User ID in Discord), not {args.discord_user!r}")
     modes = ["folders"] + (["files"] if args.files else []) + (["tba"] if args.tba else [])
@@ -821,8 +854,17 @@ def run(args, name: str | None, modes: str) -> int:
     if not (url and api_key):
         raise CouldntStart(f"no {arr_name} URL or API key: set {prefix}_URL and {prefix}_API_KEY (e.g. in .env), "
                            "or pass --url and --api-key")
+    count = args.count
+    if count is None:
+        raw = (os.environ.get(f"{prefix}_RENAME_COUNT") or "").strip()
+        if raw and not raw.isdigit():
+            raise CouldntStart(f"{prefix}_RENAME_COUNT must be a whole number (0 or more), not {raw!r}")
+        count = int(raw or 0)
+    checked_tag = (args.checked_tag or os.environ.get(f"{prefix}_RENAME_TAG") or CHECKED_TAG).strip().lower()
     arr = Arr(url, api_key)
     things = "series" if args.app == "sonarr" else "movies"
+    changing = args.apply or args.interactive
+    rounds = {}  # batched: "pool" (those it could check), "untagged" (not checked yet this pass), "picked", "rotated"
     try:
         try:
             app = arr.get("/api/v3/system/status").get("appName", "")
@@ -836,16 +878,31 @@ def run(args, name: str | None, modes: str) -> int:
         print(f"Reading {things} from {app}")
         tag_name = args.ignore_tag or os.environ.get(f"{prefix}_IGNORE_TAG")
         ignore_tag = None
+        tags = {t["label"].lower(): t["id"] for t in arr.get("/api/v3/tag")} if tag_name or count else {}
         if tag_name:
-            tags = {t["label"].lower(): t["id"] for t in arr.get("/api/v3/tag")}
             if tag_name.lower() not in tags:
                 raise CouldntStart(f"{app} has no tag {tag_name!r}, so nothing would be ignored. "
                                    f"Its tags: {', '.join(sorted(tags)) or 'none'}")
             ignore_tag = tags[tag_name.lower()]
             print(f"Ignoring {things} tagged {tag_name!r}")
         roots = root_folders(arr)
+
+        def pick(pool):
+            """The next `count` of `pool` not checked yet in this pass (from the top, once they all have been)."""
+            untagged = [i for i in pool if tags.get(checked_tag) not in i.get("tags", [])]
+            rounds.update(pool=pool, rotated=bool(pool) and not untagged)
+            rounds["untagged"] = pool if rounds["rotated"] else untagged
+            rounds["picked"] = rounds["untagged"][:count]
+            return rounds["picked"]
         mismatches, not_on_disk, ignored, taken = plan(arr, kind, files_mode, ignore_tag, args.ignore_case,
-                                                       args.ignore_punctuation, roots)
+                                                       args.ignore_punctuation, roots, pick if count else None)
+        if rounds.get("rotated"):  # every one checked: take the tag off them and start over
+            print(f"Every one of the {things} has been checked: {'starting' if changing else 'a run that changes things starts'} over")
+            if changing:
+                retag(arr, kind, [i["id"] for i in rounds["pool"]], tags[checked_tag], "remove")
+        if rounds:
+            print(f"{len(rounds['pool']):,} {things}, {len(rounds['untagged']):,} still to check this pass: "
+                  f"checking {len(rounds['picked']):,} (tagged {checked_tag!r} once checked)")
     except CouldntStart:
         raise
     except Exception as e:  # e.g. the arr can't be reached, refuses the API key, or sends a reply we can't read
@@ -853,7 +910,6 @@ def run(args, name: str | None, modes: str) -> int:
             traceback.print_exc()  # not a connection problem, so maybe a bug: put the details in the log
         raise CouldntStart(str(e) if isinstance(e, OSError) else repr(e)) from e
 
-    changing = args.apply or args.interactive
     # The Discord entries, as (title, diff): renames left for --interactive, and renames done (in a dry run, to do)
     not_renamed, renames = [], []
 
@@ -924,6 +980,7 @@ def run(args, name: str | None, modes: str) -> int:
     # folders, the files in those folders, items with file renames, and files renamed
     done, need = [0, 0, 0, 0], [0, 0, 0, 0]
     stopped = rename_all = False
+    unchecked = set()  # with a count: the ids not to tag, as the run stopped at them or before them, or they're gone
     last_done = None  # when the previous rename and its checks finished (see THROTTLE)
     for i, m in enumerate(mismatches, 1):
         print(f"[{i}/{len(mismatches)}] FOLDER {m.item['path'].rstrip('/')}")
@@ -943,6 +1000,7 @@ def run(args, name: str | None, modes: str) -> int:
         except Gone:
             print(f"    GONE: deleted from {app} mid-run: skipped")
             deleted += 1
+            unchecked.add(m.item["id"])
             change(m, folder, gone=True)
             continue
         except Exception as e:  # any error, not just connection ones: stop the run, but still send the report
@@ -950,6 +1008,7 @@ def run(args, name: str | None, modes: str) -> int:
             change(m, folder, " - FAILED")
             stopped = True
             not_reviewed = sum(map(to_do, mismatches[i:]))
+            unchecked |= {x.item["id"] for x in mismatches[i - 1:]}
             print("Stopping, so nothing else is moved until you've looked at this.")
             break
         if not present:
@@ -1000,6 +1059,7 @@ def run(args, name: str | None, modes: str) -> int:
                     choice = "y"  # no to the TBA? files, but still rename the rest
             if choice == "q":
                 not_reviewed = sum(map(to_do, mismatches[i - 1:]))  # this one too
+                unchecked |= {x.item["id"] for x in mismatches[i - 1:]}
                 break
             if choice == "n":
                 declined += 1
@@ -1057,9 +1117,23 @@ def run(args, name: str | None, modes: str) -> int:
         if not ok:
             stopped = True
             not_reviewed = sum(map(to_do, mismatches[i:]))
+            unchecked |= {x.item["id"] for x in mismatches[i - 1:]}
             print("Stopping, so nothing else is moved until you've looked at this.")
             break
         renamed += 1
+
+    tagged = [i["id"] for i in rounds.get("picked", []) if i["id"] not in unchecked]  # (a dry run: what it would tag)
+    tag_failed = ""
+    if changing and tagged:
+        try:
+            if checked_tag not in tags:
+                tags[checked_tag] = arr.call("POST", "/api/v3/tag", {"label": checked_tag})["id"]
+            retag(arr, kind, tagged, tags[checked_tag], "add")
+        except Exception as e:  # the renames have happened either way: those not tagged are just checked again
+            tag_failed = f"couldn't tag them {checked_tag!r}, so the next run checks them again: " \
+                         f"{e if isinstance(e, OSError) else repr(e)}"
+            print(f"WARNING: {tag_failed}", file=sys.stderr)
+            tagged = []
 
     if not changing:  # dry run: count what --apply would rename, and what it would leave for --interactive
         for m in mismatches:
@@ -1112,6 +1186,14 @@ def run(args, name: str | None, modes: str) -> int:
                                               for k in ("punctuation", "capitals")}}
     if any(why_ignored.values()):
         lines.append("Ignored: " + ", ".join(f"{n} {why}" for why, n in why_ignored.items() if n))
+    if rounds:  # how far through the pass it is, and how many more runs that takes at this batch size
+        left = len(rounds["untagged"]) - len(tagged)
+        runs = -(-left // count)
+        lines.append(f"{'Would check' if not changing else 'Checked'} {len(rounds['picked']):,} of {len(rounds['pool']):,} "
+                     f"{nouns.lower()}" + (f"; {left:,} left to check, {runs:,} more run{'s' if runs != 1 else ''} at {count:,} a run"
+                                           if left else "; 100% checked next run starts over"))
+        if tag_failed:
+            lines.append(discord_escape(tag_failed[0].upper() + tag_failed[1:]))
     files_ignored = {k.capitalize(): sum(k in s[3] for m in mismatches for s in m.skipped)
                      for k in ("punctuation", "capitals")}
     if any(files_ignored.values()):
