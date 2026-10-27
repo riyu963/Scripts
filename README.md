@@ -21,9 +21,9 @@ Add named sets to `.env`, such as `SONARR_ANIME_URL` / `SONARR_ANIME_API_KEY` / 
 Rather than checking the whole library every run, each run can check a batch of it. Set the batch size with `SONARR_RENAME_COUNT` / `RADARR_RENAME_COUNT` (or `--count N`), and each run checks the next N series or movies, in title order, that haven't been checked yet in this pass through the library.
 
 - With `--apply` or `-i`, each one checked is tagged `SONARR_RENAME_TAG` / `RADARR_RENAME_TAG` (or `--checked-tag`; default `rename-checked`, created if it isn't there), so the next run moves on to the next batch.
-- Once the whole library has the tag, the next run removes it from everything and starts a new pass from the top.
+- The run that checks the last of them removes the tag from everything, so the next run starts a new pass from the top. Ones added since are just part of that pass, rather than being all each run checks.
 - If a run stops partway, the ones it didn't finish stay untagged and are checked again next run. Ones left for `-i` are tagged like the rest and come round again next pass.
-- The summary and the Discord post show the progress: `Checked 50 of 1,234 series; 1,184 left to check, 24 more runs at 50 a run`, or at the end of a pass `Checked 34 of 1,234 series; 100% checked next run starts over`.
+- The summary and the Discord post show the progress: `Checked 50 series this run; total 100 of 1,234 series checked, 1,134 left to check, 23 more runs at 50 a run`, or at the end of a pass `Checked 34 series this run; total 1,234 of 1,234 series checked, next run starts over`.
 - A dry run never tags. Leave the batch size empty, or set it to 0, to check everything every run.
 - Named sets have their own: `SONARR_ANIME_RENAME_COUNT`, `SONARR_ANIME_RENAME_TAG`.
 

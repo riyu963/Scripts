@@ -69,12 +69,13 @@ Batched runs
   the next N series or movies, in title order, that haven't been checked yet in this pass through
   the library. With --apply or --interactive, each one it checks is tagged SONARR_RENAME_TAG /
   RADARR_RENAME_TAG (or --checked-tag; default rename-checked, created if the arr hasn't got it),
-  so the next run moves on to the next batch. Once the whole library has the tag, the next run
-  takes it off everything and starts a new pass from the top.
+  so the next run moves on to the next batch. The run that checks the last of them takes the tag
+  off everything, so the next run starts a new pass from the top (ones added since are just part
+  of that pass, rather than being all each run checks).
   If a run stops partway, the ones it didn't finish stay untagged and the next run checks them
   again. Ones left for --interactive are tagged like the rest and come round again next pass.
-  The summary and the Discord post show the progress, e.g. "Checked 50 of 1,234 series; 1,184 left
-  to check, 24 more runs at 50 a run". A dry run never tags. Leave the batch size empty, or set it
+  The summary and the Discord post show the progress, e.g. "Checked 50 series this run; total 100
+  of 1,234 series checked, 1,134 left to check, 23 more runs at 50 a run". A dry run never tags. Leave the batch size empty, or set it
   to 0, to check everything every run.
 
 Several Sonarrs or Radarrs
@@ -901,8 +902,10 @@ def run(args, name: str | None, modes: str) -> int:
             if changing:
                 retag(arr, kind, [i["id"] for i in rounds["pool"]], tags[checked_tag], "remove")
         if rounds:
+            last = len(rounds["picked"]) == len(rounds["untagged"])
             print(f"{len(rounds['pool']):,} {things}, {len(rounds['untagged']):,} still to check this pass: "
-                  f"checking {len(rounds['picked']):,} (tagged {checked_tag!r} once checked)")
+                  f"checking {len(rounds['picked']):,} " + ("(the last of this pass: the tag then comes off them all)"
+                                                           if last else f"(tagged {checked_tag!r} once checked)"))
     except CouldntStart:
         raise
     except Exception as e:  # e.g. the arr can't be reached, refuses the API key, or sends a reply we can't read
@@ -1124,7 +1127,18 @@ def run(args, name: str | None, modes: str) -> int:
 
     tagged = [i["id"] for i in rounds.get("picked", []) if i["id"] not in unchecked]  # (a dry run: what it would tag)
     tag_failed = ""
-    if changing and tagged:
+    # Checked the last of the pass: take the tag off them all now rather than next run, or ones added in between would be
+    # all the next run checks, and the pass would never end
+    finished = bool(rounds.get("pool")) and len(tagged) == len(rounds["untagged"])
+    if changing and finished:
+        if checked_tag in tags:
+            try:
+                retag(arr, kind, [i["id"] for i in rounds["pool"]], tags[checked_tag], "remove")
+            except Exception as e:  # the renames have happened either way: the next run checks these again, then tries again
+                tag_failed = f"couldn't take the tag {checked_tag!r} off them to start a new pass, so the next run tries again: " \
+                             f"{e if isinstance(e, OSError) else repr(e)}"
+                print(f"WARNING: {tag_failed}", file=sys.stderr)
+    elif changing and tagged:
         try:
             if checked_tag not in tags:
                 tags[checked_tag] = arr.call("POST", "/api/v3/tag", {"label": checked_tag})["id"]
@@ -1189,9 +1203,15 @@ def run(args, name: str | None, modes: str) -> int:
     if rounds:  # how far through the pass it is, and how many more runs that takes at this batch size
         left = len(rounds["untagged"]) - len(tagged)
         runs = -(-left // count)
-        lines.append(f"{'Would check' if not changing else 'Checked'} {len(rounds['picked']):,} of {len(rounds['pool']):,} "
-                     f"{nouns.lower()}" + (f"; {left:,} left to check, {runs:,} more run{'s' if runs != 1 else ''} at {count:,} a run"
-                                           if left else "; 100% checked next run starts over"))
+        picked, pool, did = len(rounds["picked"]), len(rounds["pool"]), "Would check" if not changing else "Checked"
+        noun = nouns.lower()
+        if left:
+            lines.append(f"{did} {picked:,} {noun} this run; total {pool - left:,} of {pool:,} {noun} checked, "
+                         f"{left:,} left to check, {runs:,} more run{'s' if runs != 1 else ''} at {count:,} a run")
+        elif picked == pool:  # the whole pass in one run
+            lines.append(f"{did} all {pool:,} {noun} this run; next run starts over")
+        else:
+            lines.append(f"{did} {picked:,} {noun} this run; total {pool:,} of {pool:,} {noun} checked, next run starts over")
         if tag_failed:
             lines.append(discord_escape(tag_failed[0].upper() + tag_failed[1:]))
     files_ignored = {k.capitalize(): sum(k in s[3] for m in mismatches for s in m.skipped)
