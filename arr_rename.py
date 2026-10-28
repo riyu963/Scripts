@@ -69,7 +69,8 @@ Batched runs
   the next N series or movies, in title order, that haven't been checked yet in this pass through
   the library. With --apply or --interactive, each one it checks is tagged SONARR_RENAME_TAG /
   RADARR_RENAME_TAG (or --checked-tag; default rename-checked, created if the arr hasn't got it),
-  so the next run moves on to the next batch. The run that checks the last of them takes the tag
+  so the next run moves on to the next batch. The tag can only have letters, digits and - (the arr
+  won't make any other), and can't be the --ignore-tag; with such a tag, the run doesn't start. The run that checks the last of them takes the tag
   off everything, so the next run starts a new pass from the top (ones added since are just part
   of that pass, rather than being all each run checks).
   If a run stops partway, the ones it didn't finish stay untagged and the next run checks them
@@ -78,9 +79,20 @@ Batched runs
   of 1,234 series checked, 1,134 left to check, 23 more runs at 50 a run". A dry run never tags. Leave the batch size empty, or set it
   to 0, to check everything every run.
 
+Rename limit
+  Or each run can check everything but rename at most N series or movies, with SONARR_RENAME_MAX /
+  RADARR_RENAME_MAX (or --max-renames N): once N have been renamed, the rest that need renaming are
+  listed as LATER and left alone (not even refreshed in the arr). No tag is needed: the ones
+  renamed now match, so the next run finds nothing to do for them and goes on to the rest.
+  Irregular folders and TBA? files left for --interactive, and those that can't be renamed or are
+  ignored, don't count towards N and are never LATER: they're listed as usual every run. A dry run stops at the same
+  point, so it shows what --apply would do. The summary and the Discord post say how far it got,
+  e.g. "Rename limit 10 - 25 more to rename in 3 runs". With batched runs
+  too, those left for later aren't tagged, so they're checked again next run. Empty or 0: no limit.
+
 Several Sonarrs or Radarrs
   Besides the main one (SONARR_URL, SONARR_API_KEY, SONARR_IGNORE_TAG, SONARR_RENAME_COUNT,
-  SONARR_RENAME_TAG), you can set up named ones: SONARR_ANIME_URL, SONARR_ANIME_API_KEY and so on
+  SONARR_RENAME_TAG, SONARR_RENAME_MAX), you can set up named ones: SONARR_ANIME_URL, SONARR_ANIME_API_KEY and so on
   make one called "anime" (the same for RADARR_..._URL). A run checks every one in turn, main first, then by name, each with its
   own section in the log and its own Discord post; --instance anime (or main) checks just one.
   One that can't start (see below) is skipped, and the others are still checked. A problem once
@@ -88,7 +100,8 @@ Several Sonarrs or Radarrs
 
 Log and Discord
   Everything the script prints, and your answers to its questions, also go into
-  logs/arr_rename.log next to the script, with the time each run started and ended.
+  logs/arr_rename.log next to the script, with the time each run started and ended, and its
+  command line (but not an API key or webhook URL given on it).
   If a Discord webhook is set (DISCORD_WEBHOOK_URL or --discord-webhook), each run posts a report:
   whether it was a dry run, and one entry per rename (done, or still to do) showing the old and
   new folder name and the file names under it. If the run can't start in a Sonarr or Radarr (it
@@ -108,8 +121,11 @@ Settings
                                   checks (--count; see "Batched runs" above)
     SONARR_RENAME_TAG, RADARR_RENAME_TAG
                                   optional: the tag batched runs mark each one checked with
-                                  (--checked-tag; default rename-checked)
-    SONARR_<NAME>_URL, ..._API_KEY, ..._IGNORE_TAG, ..._RENAME_COUNT, ..._RENAME_TAG
+                                  (--checked-tag; default rename-checked; letters, digits and - only)
+    SONARR_RENAME_MAX, RADARR_RENAME_MAX
+                                  optional: the rename limit, the most each run renames
+                                  (--max-renames; see "Rename limit" above)
+    SONARR_<NAME>_URL, ..._API_KEY, ..._IGNORE_TAG, ..._RENAME_COUNT, ..._RENAME_TAG, ..._RENAME_MAX
                                   optional: another Sonarr, called NAME (the same for RADARR_<NAME>_...;
                                   see "Several Sonarrs or Radarrs" above)
     DISCORD_WEBHOOK_URL           optional: post each run's results to this Discord webhook
@@ -757,20 +773,27 @@ def main(argv=None) -> int:
         p.add_argument("--count", type=int, metavar="N",
                        help=f"batched runs: check the next N {things} not checked yet in this pass, tagging each one "
                             f"(default: ${var}_RENAME_COUNT, or ${var}_<NAME>_RENAME_COUNT; 0 or unset: every one)")
+        p.add_argument("--max-renames", type=int, metavar="N",
+                       help=f"rename at most N {things} each run, leaving the rest for the next runs "
+                            f"(default: ${var}_RENAME_MAX, or ${var}_<NAME>_RENAME_MAX; 0 or unset: no limit)")
         p.add_argument("--checked-tag", metavar="TAG",
-                       help=f"batched runs: the tag that marks one checked (default: ${var}_RENAME_TAG, or "
-                            f"${var}_<NAME>_RENAME_TAG, or {CHECKED_TAG})")
+                       help=f"batched runs: the tag that marks one checked, letters, digits and - only (default: "
+                            f"${var}_RENAME_TAG, or ${var}_<NAME>_RENAME_TAG, or {CHECKED_TAG})")
         p.add_argument("--discord-webhook", default=os.environ.get("DISCORD_WEBHOOK_URL"), metavar="URL",
                        help="post the results to this Discord webhook (default: $DISCORD_WEBHOOK_URL)")
         p.add_argument("--discord-user", default=os.environ.get("DISCORD_USER_ID"), metavar="ID",
                        help="Discord user id to ping when a run can't start or stops, renames need an --interactive "
                             "run or were forced, or something was deleted from the arr mid-run "
                             "(default: $DISCORD_USER_ID)")
-    args = ap.parse_args(argv)
+    args, unknown = ap.parse_known_args(argv)
+    if unknown:  # argparse's own message would show them as typed, and it goes in the log: a mistyped --apikey KEY too
+        ap.error(f"unrecognized arguments: {masked_command(unknown)}")
     if args.force and not args.apply:
         ap.error("--force only works with --apply")
     if args.count is not None and args.count < 0:
         ap.error("--count can't be less than 0")
+    if args.max_renames is not None and args.max_renames < 0:
+        ap.error("--max-renames can't be less than 0")
     if args.discord_user and not args.discord_user.isdigit():
         ap.error(f"the Discord user id must be a number (Copy User ID in Discord), not {args.discord_user!r}")
     modes = ["folders"] + (["files"] if args.files else []) + (["tba"] if args.tba else [])
@@ -861,7 +884,20 @@ def run(args, name: str | None, modes: str) -> int:
         if raw and not raw.isdigit():
             raise CouldntStart(f"{prefix}_RENAME_COUNT must be a whole number (0 or more), not {raw!r}")
         count = int(raw or 0)
-    checked_tag = (args.checked_tag or os.environ.get(f"{prefix}_RENAME_TAG") or CHECKED_TAG).strip().lower()
+    most = args.max_renames
+    if most is None:
+        raw = (os.environ.get(f"{prefix}_RENAME_MAX") or "").strip()
+        if raw and not raw.isdigit():
+            raise CouldntStart(f"{prefix}_RENAME_MAX must be a whole number (0 or more), not {raw!r}")
+        most = int(raw or 0)
+    checked_tag = (args.checked_tag or os.environ.get(f"{prefix}_RENAME_TAG") or "").strip().lower() or CHECKED_TAG
+    tag_name = args.ignore_tag or os.environ.get(f"{prefix}_IGNORE_TAG")
+    if count and not re.fullmatch(r"[a-z0-9-]+", checked_tag):  # or the arr refuses to make it, and no run ever moves on
+        raise CouldntStart(f"the checked tag {checked_tag!r} (--checked-tag or {prefix}_RENAME_TAG) can only have "
+                           "letters, digits and -, as the arr won't make any other tag")
+    if count and tag_name and tag_name.strip().lower() == checked_tag:
+        raise CouldntStart(f"the checked tag {checked_tag!r} can't also be the ignore tag (--ignore-tag or "
+                           f"{prefix}_IGNORE_TAG), or each one a run checks would be left alone from then on")
     arr = Arr(url, api_key)
     things = "series" if args.app == "sonarr" else "movies"
     changing = args.apply or args.interactive
@@ -877,7 +913,6 @@ def run(args, name: str | None, modes: str) -> int:
             raise CouldntStart(f"{url} is {f'{app}, ' if app else ''}not {arr_name}")
         kind = KINDS[args.app]
         print(f"Reading {things} from {app}")
-        tag_name = args.ignore_tag or os.environ.get(f"{prefix}_IGNORE_TAG")
         ignore_tag = None
         tags = {t["label"].lower(): t["id"] for t in arr.get("/api/v3/tag")} if tag_name or count else {}
         if tag_name:
@@ -978,14 +1013,31 @@ def run(args, name: str | None, modes: str) -> int:
         ignored or as a folder that can't be renamed.)"""
         return bool(m.problems) and not m.blocker or bool(m.files or m.unsure)
 
-    renamed = declined = needs_i = not_reviewed = up_to_date = forced = deleted = 0
+    def renames_some(m: Mismatch) -> bool:
+        """Whether this run renames any of `m`, rather than only holding it for --interactive (a dry run:
+        whether --apply would)."""
+        if args.interactive or args.force:
+            return to_do(m)
+        folder = bool(m.problems) and not m.blocker
+        return bool(folder and not m.irregular or not folder and m.files)  # an irregular folder's files wait with it
+
+    renamed =declined = needs_i = not_reviewed = up_to_date = forced = deleted = 0
     # Counts for the summary, of what was renamed (done) and what waits for --interactive (need):
     # folders, the files in those folders, items with file renames, and files renamed
     done, need = [0, 0, 0, 0], [0, 0, 0, 0]
     stopped = rename_all = False
     unchecked = set()  # with a count: the ids not to tag, as the run stopped at them or before them, or they're gone
+    later = set()  # with --max-renames: the ids of those left for the next runs, as this one renamed its most
+    would = 0  # a dry run: how many --apply would rename
     last_done = None  # when the previous rename and its checks finished (see THROTTLE)
     for i, m in enumerate(mismatches, 1):
+        if most and renames_some(m) and (renamed if changing else would) >= most:
+            if not later:
+                print(f"Reached the rename limit of {most:,} (--max-renames): the rest are left for the next runs")
+            print(f"[{i}/{len(mismatches)}] LATER  {m.item['path'].rstrip('/')}")
+            later.add(m.item["id"])
+            unchecked.add(m.item["id"])
+            continue
         print(f"[{i}/{len(mismatches)}] FOLDER {m.item['path'].rstrip('/')}")
         show(m)
         folder = bool(m.problems) and not m.blocker  # True if the folder itself will be renamed
@@ -993,6 +1045,7 @@ def run(args, name: str | None, modes: str) -> int:
             continue
         if not changing:
             change(m, folder, held=folder and bool(m.irregular))
+            would += renames_some(m)
             continue
         if last_done is not None:  # give the arr THROTTLE seconds after the previous rename, before the refresh below
             time.sleep(max(0.0, THROTTLE - (time.monotonic() - last_done)))
@@ -1149,8 +1202,9 @@ def run(args, name: str | None, modes: str) -> int:
             print(f"WARNING: {tag_failed}", file=sys.stderr)
             tagged = []
 
+    now = [m for m in mismatches if m.item["id"] not in later]  # what this run does (a dry run: would do)
     if not changing:  # dry run: count what --apply would rename, and what it would leave for --interactive
-        for m in mismatches:
+        for m in now:
             folder = bool(m.problems) and not m.blocker
             counts = need if folder and m.irregular else done  # an irregular folder's files wait with it
             counts[0] += folder
@@ -1214,6 +1268,10 @@ def run(args, name: str | None, modes: str) -> int:
             lines.append(f"{did} {picked:,} {noun} this run; total {pool:,} of {pool:,} {noun} checked, next run starts over")
         if tag_failed:
             lines.append(discord_escape(tag_failed[0].upper() + tag_failed[1:]))
+    if most:  # e.g. "Rename limit 10 - 25 more to rename in 3 runs" (the tally above counts what it renamed)
+        runs = -(-len(later) // most)
+        lines.append(f"Rename limit {most:,} - " + (f"{len(later):,} more to rename in {runs:,} run{'s' if runs != 1 else ''}"
+                                                    if later else "none left to rename"))
     files_ignored = {k.capitalize(): sum(k in s[3] for m in mismatches for s in m.skipped)
                      for k in ("punctuation", "capitals")}
     if any(files_ignored.values()):
@@ -1225,7 +1283,7 @@ def run(args, name: str | None, modes: str) -> int:
     if args.discord_webhook:
         color = RED if stopped else GREEN if renamed else BLUE
         # renames that only an --interactive run will do: irregular folders and TBA? files
-        need_i = needs_i if changing else sum(bool(m.irregular and not m.blocker or m.unsure) for m in mismatches)
+        need_i = needs_i if changing else sum(bool(m.irregular and not m.blocker or m.unsure) for m in now)
         # reasons to ping you: a problem that stopped the run, renames waiting for --interactive, renames
         # --force did anyway, and items deleted from the arr mid-run
         reasons = ["the run stopped"] if stopped else []
@@ -1290,7 +1348,8 @@ def load_env(path: str = ENV_FILE) -> None:
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 LOG_MAX_SIZE = 5 * 1024 * 1024  # bytes; a bigger log is moved to .log.1 and a new one started
 LOG_KEEP = 3  # old logs kept: .log.1 to .log.3
-SECRET = ("key", "webhook")  # options whose values are left out of the log
+SECRET = ("key", "webhook")  # options whose values are left out of the log: any with these in their name,
+SECRET_OPTIONS = ("--api-key", "--discord-webhook")  # and these however shortened (argparse takes --api for --api-key)
 
 
 class Tee:
@@ -1326,7 +1385,8 @@ def masked_command(argv) -> str:
     out, hide = [], False
     for arg in argv:
         name, eq, _ = arg.partition("=")
-        secret = arg.startswith("--") and any(s in name for s in SECRET)
+        secret = name.startswith("--") and (any(s in name for s in SECRET)
+                                            or len(name) > 2 and any(o.startswith(name) for o in SECRET_OPTIONS))
         out.append("***" if hide else f"{name}=***" if secret and eq else shlex.quote(arg))
         hide = secret and not eq  # the value is the next argument
     return " ".join(out)
