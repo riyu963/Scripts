@@ -13,8 +13,7 @@ What is checked
   says what is different: the title, the year, an id tag ({tvdb-...}, {tmdb-...}, {imdb-...} or
   {tvmaze-...}) that doesn't match the arr's id, or only the capitals. The two options apply to
   file names in the same way: a file rename that only changes what they ignore is skipped.
-  These checks only read from the arr, 4 at a time (a few times faster with an arr behind a
-  reverse proxy or on another machine); the renames below are done one at a time.
+  These checks only read from the arr.
 
 How a folder is renamed (only with --apply or --interactive)
   1. The item is refreshed in the arr, and the script waits for that to finish. A failed refresh
@@ -22,8 +21,7 @@ How a folder is renamed (only with --apply or --interactive)
      skipped, and the Discord report lists it as GONE, with a ping.
   2. The item is checked again. If it no longer needs renaming, it's skipped. If the new name has
      changed, the new one is used.
-  3. Half a second later, once any refresh the arr is running has finished (one running during
-     the move could put the old folder back), the folder is renamed the same way the arr's web
+  3. Once any refresh the arr is running has finished the folder is renamed the same way the arr's web
      page does it: the item's root folder is "changed" to the one it's already in, with "move
      files" on, so the arr moves the folder to <root folder>/<correct name>. A folder inside a
      subfolder of a root folder can't be renamed this way (the arr only takes a root folder, and
@@ -53,15 +51,14 @@ File names
 Irregular renames
   If the new name would lose something the current folder name has (its year, an id tag or the
   title), the arr is probably missing some information. The rename is marked IRREGULAR and only
-  done with --interactive, after asking you.
+  done with --interactive or --force
 
 Options
   By default this is a dry run: nothing is changed. --apply does every rename, and --interactive
   asks you about each one. --apply --force also does the renames that would otherwise need
-  --interactive (irregular folders and TBA? files) and marks them FORCED. Folders that can't be
-  renamed, for example because their new name is already taken, are still skipped.
-  Series and movies with the tag given by --ignore-tag (or SONARR_IGNORE_TAG / RADARR_IGNORE_TAG)
-  are left alone.
+  --interactive and marks them FORCED. Folders that can't be renamed, 
+  for example because their new name is already taken, are still skipped.
+  Series and movies with the tag ignore tag are left alone.
 
 Batched runs
   Rather than checking the whole library every time, each run can check a batch of it. Set the
@@ -71,8 +68,7 @@ Batched runs
   RADARR_RENAME_TAG (or --checked-tag; default rename-checked, created if the arr hasn't got it),
   so the next run moves on to the next batch. The tag can only have letters, digits and - (the arr
   won't make any other), and can't be the --ignore-tag; with such a tag, the run doesn't start. The run that checks the last of them takes the tag
-  off everything, so the next run starts a new pass from the top (ones added since are just part
-  of that pass, rather than being all each run checks).
+  off everything, so the next run starts a new pass from the top.
   If a run stops partway, the ones it didn't finish stay untagged and the next run checks them
   again. Ones left for --interactive are tagged like the rest and come round again next pass.
   The summary and the Discord post show the progress, e.g. "Checked 50 series this run; total 100
@@ -80,18 +76,17 @@ Batched runs
   to 0, to check everything every run.
 
 Rename limit
-  Or each run can check everything but rename at most N series or movies, with SONARR_RENAME_MAX /
-  RADARR_RENAME_MAX (or --max-renames N): once N have been renamed, the rest that need renaming are
-  listed as LATER and left alone (not even refreshed in the arr). No tag is needed: the ones
+  Rename at most N series or movies, with SONARR_RENAME_MAX / RADARR_RENAME_MAX (or --max-renames N): 
+  once N have been renamed, the rest that need renaming are listed as LATER and left alone. No tag is needed: the ones
   renamed now match, so the next run finds nothing to do for them and goes on to the rest.
   Irregular folders and TBA? files left for --interactive, and those that can't be renamed or are
   ignored, don't count towards N and are never LATER: they're listed as usual every run. A dry run stops at the same
   point, so it shows what --apply would do. The summary and the Discord post say how far it got,
-  e.g. "Rename limit 10 - 25 more to rename in 3 runs". With batched runs
-  too, those left for later aren't tagged, so they're checked again next run. Empty or 0: no limit.
+  e.g. "Rename limit 10 - 25 more to rename in 3 runs". 
+  With batched runs too, those left for later aren't tagged, so they're checked again next run. Empty or 0: no limit.
 
 Several Sonarrs or Radarrs
-  Besides the main one (SONARR_URL, SONARR_API_KEY, SONARR_IGNORE_TAG, SONARR_RENAME_COUNT,
+  Besides the main one (SONARR_URL, SONARR_API_KEY, SONARR_IGNORE_TAG, SONARR_RENAME_COUNT, - A main instance is optional and all can be named.
   SONARR_RENAME_TAG, SONARR_RENAME_MAX), you can set up named ones: SONARR_ANIME_URL, SONARR_ANIME_API_KEY and so on
   make one called "anime" (the same for RADARR_..._URL). A run checks every one in turn, main first, then by name, each with its
   own section in the log and its own Discord post; --instance anime (or main) checks just one.
