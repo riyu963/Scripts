@@ -719,7 +719,7 @@ def rename_files(arr: Arr, kind: Kind, item_id: int, only: set | None = None) ->
 
 def tally(noun: str, nouns: str, folders: int, moved: int, items: int, files: int) -> str:
     """The two summary lines, e.g. "1 Series folder with 12 files" and "2 Series with file renames -
-    8 files total"."""
+    8 files total". An item whose folder is renamed counts only on the first, its own file renames too."""
     return (f"{folders} {noun} folder{'' if folders == 1 else 's'} with {moved} file{'' if moved == 1 else 's'}\n"
             f"{items} {noun if items == 1 else nouns} with file renames - {files} file{'' if files == 1 else 's'} total")
 
@@ -1021,7 +1021,7 @@ def run(args, name: str | None, modes: str) -> int:
         folder = bool(m.problems) and not m.blocker
         return bool(folder and not m.irregular or not folder and m.files)  # an irregular folder's files wait with it
 
-    renamed =declined = needs_i = not_reviewed = up_to_date = forced = deleted = 0
+    renamed = declined = needs_i = not_reviewed = up_to_date = forced = deleted = 0
     # Counts for the summary, of what was renamed (done) and what waits for --interactive (need):
     # folders, the files in those folders, items with file renames, and files renamed
     done, need = [0, 0, 0, 0], [0, 0, 0, 0]
@@ -1089,11 +1089,8 @@ def run(args, name: str | None, modes: str) -> int:
         elif irregular_folder and not args.interactive:
             print("    NOT RENAMED: irregular; review it with --interactive")
             needs_i += 1
-            need[0] += 1
+            need[0] += 1  # its files are counted with the folder, not as file renames
             need[1] += m.count
-            if m.files:
-                need[2] += 1
-                need[3] += len(m.files)
             change(m, folder, held=True)  # listed, so the Discord ping shows what needs looking at
             continue
         took_unsure = False
@@ -1152,7 +1149,7 @@ def run(args, name: str | None, modes: str) -> int:
                     m = m._replace(files=tuple(f for f in files_done if f[0] not in unsure_ids),
                                    unsure=tuple(f for f in files_done if f[0] in unsure_ids) if took_unsure else m.unsure)
                     took_unsure = took_unsure and bool(m.unsure)
-                    if files_done:
+                    if files_done and not folder:  # a renamed folder's files are counted with it
                         done[2] += 1
                         done[3] += len(files_done)
         except Exception as e:  # any error stops the run, as above
@@ -1209,7 +1206,7 @@ def run(args, name: str | None, modes: str) -> int:
             counts = need if folder and m.irregular else done  # an irregular folder's files wait with it
             counts[0] += folder
             counts[1] += m.count
-            if m.files:
+            if m.files and not folder:  # a renamed folder's files are counted with it
                 counts[2] += 1
                 counts[3] += len(m.files)
             if m.unsure:
