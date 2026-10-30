@@ -67,13 +67,14 @@ Batched runs
   the library. With --apply or --interactive, each one it checks is tagged SONARR_RENAME_TAG /
   RADARR_RENAME_TAG (or --checked-tag; default rename-checked, created if the arr hasn't got it),
   so the next run moves on to the next batch. The tag can only have letters, digits and - (the arr
-  won't make any other), and can't be the --ignore-tag; with such a tag, the run doesn't start. The run that checks the last of them takes the tag
-  off everything, so the next run starts a new pass from the top.
+  won't make any other), and can't be the --ignore-tag; with such a tag, the run doesn't start.
+  The run that checks the last of them takes the tag off everything, so the next run starts a new
+  pass from the top.
   If a run stops partway, the ones it didn't finish stay untagged and the next run checks them
   again. Ones left for --interactive are tagged like the rest and come round again next pass.
   The summary and the Discord post show the progress, e.g. "Checked 50 series this run; total 100
-  of 1,234 series checked, 1,134 left to check, 23 more runs at 50 a run". A dry run never tags. Leave the batch size empty, or set it
-  to 0, to check everything every run.
+  of 1,234 series checked, 1,134 left to check, 23 more runs at 50 a run". A dry run never tags.
+  Leave the batch size empty, or set it to 0, to check everything every run.
 
 Rename limit
   Rename at most N series or movies, with SONARR_RENAME_MAX / RADARR_RENAME_MAX (or --max-renames N): 
@@ -109,6 +110,7 @@ Settings
   KEY=value per line (keep it private: chmod 600 .env). Command-line options win over both.
     SONARR_URL, SONARR_API_KEY    e.g. SONARR_URL=http://192.168.1.10:8989
     RADARR_URL, RADARR_API_KEY    e.g. RADARR_URL=http://192.168.1.10:7878
+                                  (http:// can be left out: 192.168.1.10:8989)
     SONARR_IGNORE_TAG             optional: leave series with this tag alone (--ignore-tag)
     RADARR_IGNORE_TAG             optional: leave movies with this tag alone (--ignore-tag)
     SONARR_RENAME_COUNT, RADARR_RENAME_COUNT
@@ -743,8 +745,8 @@ def main(argv=None) -> int:
         p.add_argument("--instance", metavar="NAME",
                        help=f"only check this {name.capitalize()}: NAME from ${var}_<NAME>_URL, or main for ${var}_URL "
                             f"(default: every one set up, in turn)")
-        p.add_argument("--url", help=f"{name.capitalize()} URL, for one instance (default: ${var}_URL, or "
-                                     f"${var}_<NAME>_URL with --instance)")
+        p.add_argument("--url", help=f"{name.capitalize()} URL (http:// can be left out: 192.168.1.10:8989), for "
+                                     f"one instance (default: ${var}_URL, or ${var}_<NAME>_URL with --instance)")
         p.add_argument("--api-key", help=f"its API key (default: ${var}_API_KEY, or ${var}_<NAME>_API_KEY)")
         mode = p.add_mutually_exclusive_group()
         mode.add_argument("--apply", action="store_true",
@@ -848,6 +850,12 @@ def settings(app: str, name: str | None) -> tuple[str, str]:
             app.capitalize() + (f" {name.title()}" if name else ""))
 
 
+def full_url(url: str) -> str:
+    """`url` with http:// in front if it has no http:// or https://: "192.168.1.10:8989" is
+    http://192.168.1.10:8989."""
+    return url if "://" in url else "http://" + url
+
+
 class CouldntStart(Exception):
     """Why the run can't start in a Sonarr or Radarr. It's found out before anything is changed in it."""
 
@@ -876,6 +884,7 @@ def run(args, name: str | None, modes: str) -> int:
     if not (url and api_key):
         raise CouldntStart(f"no {arr_name} URL or API key: set {prefix}_URL and {prefix}_API_KEY (e.g. in .env), "
                            "or pass --url and --api-key")
+    url = full_url(url)
     count = args.count
     if count is None:
         raw = (os.environ.get(f"{prefix}_RENAME_COUNT") or "").strip()
