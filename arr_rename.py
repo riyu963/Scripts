@@ -168,6 +168,9 @@ RETRY = 10      # seconds to wait before trying a failed read from the arr again
 THREADS = 4     # reads at a time while checking: as fast as 10 against a nearby arr, with less load on it
 BUSY = ("queued", "started")
 CHECKED_TAG = "rename-checked"  # what marks one checked in this pass through the library (see "Batched runs")
+# The oldest versions whose API has the /folder endpoint that check() asks folder names from: older ones answer 404.
+# (Sonarr's first release with it is 4.0.12.2823; its develop builds have it from 4.0.11.2688.)
+MIN_VERSIONS = {"sonarr": (4, 0, 11, 2688), "radarr": (5, 22, 3, 9889)}
 FOLDER_FILES = 2  # Discord: files listed under a renamed folder before "… and N more files"
 FILES_ONLY = 13   # Discord: files listed (per list) when only an item's files are renamed (--files or --tba)
 # The differences --ignore-case and --ignore-punctuation can skip: (how the log describes it, the option)
@@ -904,13 +907,18 @@ def run(args, name: str | None, modes: str) -> int:
     rounds = {}  # batched: "pool" (those it could check), "untagged" (not checked yet this pass), "picked", "rotated"
     try:
         try:
-            app = arr.get("/api/v3/system/status").get("appName", "")
+            system = arr.get("/api/v3/system/status")
         except OSError as e:
             if isinstance(e.__cause__, urllib.error.HTTPError) and e.__cause__.code == 404:
                 raise CouldntStart(f"{url} doesn't look like {arr_name}: it has no /api/v3/system/status ({e})") from e
             raise
+        app, version = system.get("appName", ""), str(system.get("version") or "")
         if app.lower() != args.app:
             raise CouldntStart(f"{url} is {f'{app}, ' if app else ''}not {arr_name}")
+        have, need = tuple(map(int, re.findall(r"\d+", version)[:4])), MIN_VERSIONS[args.app]
+        if have and have < need:  # (one whose version can't be read is let through)
+            raise CouldntStart(f"{app} {version} is too old: update it to {'.'.join(map(str, need))} or newer. Older "
+                               "ones can't say what a folder should be called (their API has no /folder endpoint)")
         kind = KINDS[args.app]
         print(f"Reading {things} from {app}")
         ignore_tag = None
