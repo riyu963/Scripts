@@ -1331,8 +1331,13 @@ def load_env(path: str = ENV_FILE) -> None:
         key, sep, value = (part.strip() for part in line.partition("="))
         if not (sep and key):
             sys.exit(f"{path}:{n}: expected KEY=value")
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
+        quoted = re.fullmatch(r"""(["'])(.*?)\1\s*(?:#.*)?""", value)
+        if quoted:  # kept as it is, # and all; a comment may follow the closing quote
+            value = quoted.group(2)
+        elif value.startswith(("'", '"')):
+            sys.exit(f"{path}:{n}: a quoted value needs its closing {value[0]}, with nothing but a # comment after it")
+        else:  # a # at the start or after a space or tab starts a comment
+            value = re.sub(r"(?:^|\s+)#.*", "", value)
         os.environ.setdefault(key, value)
 
 
