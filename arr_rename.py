@@ -165,6 +165,7 @@ RETRY = 10      # seconds to wait before trying a failed read from the arr again
 THREADS = 4     # reads at a time while checking: as fast as 10 against a nearby arr, with less load on it
 BUSY = ("queued", "started")
 CHECKED_TAG = "rename-checked"  # what marks one checked in this pass through the library (see "Batched runs")
+SEARCH_TAG = "upgrade-searched"  # arr_upgrade_search.py's search tag, which the checked tag can't be
 # The oldest versions whose API has the /folder endpoint that check() asks folder names from: older ones answer 404.
 # (Sonarr's first release with it is 4.0.12.2823; its develop builds have it from 4.0.11.2688.)
 MIN_VERSIONS = {"sonarr": (4, 0, 11, 2688), "radarr": (5, 22, 3, 9889)}
@@ -905,6 +906,15 @@ def run(args, name: str | None, modes: str) -> int:
     if count and tag_name and tag_name.strip().lower() == checked_tag:
         raise CouldntStart(f"the checked tag {checked_tag!r} can't also be the ignore tag (--ignore-tag or "
                            f"{prefix}_IGNORE_TAG), or each one a run checks would be left alone from then on")
+    # (nor one of arr_upgrade_search.py's, on the same arr: a run of either would add or take off the other's tag)
+    search_tag = (os.environ.get(f"{prefix}_UPGRADE_SEARCH_TAG") or "").strip().lower() or SEARCH_TAG
+    search_ignore = (os.environ.get(f"{prefix}_UPGRADE_IGNORE_TAG") or "").strip().lower()
+    if count and checked_tag == search_tag:
+        raise CouldntStart(f"the checked tag {checked_tag!r} can't also be arr_upgrade_search.py's search tag "
+                           f"({prefix}_UPGRADE_SEARCH_TAG, default {SEARCH_TAG}), or each script would take the other's off")
+    if count and search_ignore and checked_tag == search_ignore:
+        raise CouldntStart(f"the checked tag {checked_tag!r} can't also be arr_upgrade_search.py's ignore tag "
+                           f"({prefix}_UPGRADE_IGNORE_TAG), or it would leave alone each one a run checks")
     arr = Arr(url, api_key)
     things = "series" if args.app == "sonarr" else "movies"
     changing = args.apply or args.interactive

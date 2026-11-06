@@ -21,7 +21,7 @@ Add named sets to `.env`, such as `SONARR_ANIME_URL` / `SONARR_ANIME_API_KEY` / 
 Rather than checking the whole library every run, each run can check a batch of it. Set the batch size with `SONARR_RENAME_COUNT` / `RADARR_RENAME_COUNT` (or `--count N`), and each run checks the next N series or movies, in title order, that haven't been checked yet in this pass through the library.
 
 - With `--apply` or `-i`, each one checked is tagged `SONARR_RENAME_TAG` / `RADARR_RENAME_TAG` (or `--checked-tag`; default `rename-checked`, created if it isn't there), so the next run moves on to the next batch.
-- The tag can only have letters, digits and `-` (the arr won't make any other), and can't be the ignore tag. With such a tag the run doesn't start, and says why.
+- The tag can only have letters, digits and `-` (the arr won't make any other), and can't be the ignore tag, or either of `arr_upgrade_search.py`'s tags (`SONARR_UPGRADE_SEARCH_TAG`, default `upgrade-searched`, and `SONARR_UPGRADE_IGNORE_TAG`). With such a tag the run doesn't start, and says why.
 - The run that checks the last of them removes the tag from everything, so the next run starts a new pass from the top. Ones added since are just part of that pass, rather than being all each run checks.
 - If a run stops partway, the ones it didn't finish stay untagged and are checked again next run. Ones left for `-i` are tagged like the rest and come round again next pass.
 - The summary and the Discord post show the progress: `Checked 50 series this run; total 100 of 1,234 series checked, 1,134 left to check, 23 more runs at 50 a run`, or at the end of a pass `Checked 34 series this run; total 1,234 of 1,234 series checked, next run starts over`.
@@ -85,3 +85,89 @@ Renames that would lose information (a year, an id tag, the title) are marked **
 | `--discord-user ID` | Discord user id to ping when a run can't start or stops, something needs `-i` or was forced, or something was deleted from Sonarr/Radarr mid-run (default: `DISCORD_USER_ID`) |
 
 `--apply` and `-i` can't be combined, and neither can `--files` and `--tba`.
+
+# arr_upgrade_search.py
+
+Searches Sonarr and Radarr for upgrades they missed, runs in batches until the whole library has been searched then starts over.
+
+Python 3.9+ (standard library only). It uses the same `.env` as `arr_rename.py`.
+
+## How it works
+
+How many it searches a run has to be set: `SONARR_UPGRADE_COUNT` / `RADARR_UPGRADE_COUNT` (`SONARR_ANIME_UPGRADE_COUNT` for a named one), or `--count N` for every one. A Sonarr or Radarr without one isn't searched.
+
+- Each run searches the next `SONARR_UPGRADE_COUNT` / `RADARR_UPGRADE_COUNT` (or `--count N`; 1 to 500) monitored series or movies that are out, in title order. Sonarr gets a series search, Radarr a movie search.
+- Each one searched is tagged `upgrade-searched` (`--search-tag`; created if it isn't there) The run that searches the last film/series takes the tag off them all, so the next run starts over from the top. Failed searches aren't tagged and left for the next run.
+- After each search it reads what the arr grabbed from its history, and shows each grab old against new: the file (or season pack) it replaces, with its quality and custom format score, then what was grabbed.
+- Each grab is remembered in `logs/arr_upgrade_search_grabs.json`, and the next runs say whether it imported (and at what quality and score) or failed. One still not imported after 7 days is let go. One whose download is stuck in the arr's queue (blocked from importing, failed to import, or with a warning) is listed under `Stuck in the queue`, with the arr's own reason, each run until it imports or is let go.
+- Without `--apply` it's a dry run: it says what it would search, and searches and tags nothing.
+
+## What it searches
+
+| Option | Description |
+| --- | --- |
+| `--mode all` | Every one that's out, with files or not (the default): a movie Radarr counts as available, a series whose first episode has aired |
+| `--mode cutoff` | Only those below their quality profile's cutoff (the arr's Wanted > Cutoff Unmet) |
+| `--mode missing` | Only missing ones (Wanted > Missing) |
+| `--tag NAME` | Only those with this tag (repeat it for any of several) |
+| `--ignore-tag TAG` | Leave those with this tag alone (default: `SONARR_UPGRADE_IGNORE_TAG` / `RADARR_UPGRADE_IGNORE_TAG`). A tag the arr hasn't got stops the run, and says why, as in `arr_rename.py`; so does one that's also the search tag |
+| `--search-tag TAG` | The tag that marks one searched (default: `SONARR_UPGRADE_SEARCH_TAG` / `RADARR_UPGRADE_SEARCH_TAG`, or `upgrade-searched`). It can't be the ignore tag or either of `arr_rename.py`'s tags (`SONARR_RENAME_TAG`, default `rename-checked`, and `SONARR_IGNORE_TAG`); with one of them the run doesn't start, and says why |
+| `--quality-profile NAME` | Only those with this quality profile |
+| `--age DAYS` | Only those released DAYS days ago or more: with 5 on 20 November, those released on 15 November or before (a movie: the earliest of in cinemas, digital and disc; a series: its first episode). One with no release date is left out. Each run's summary says how many it left out: `Skipped: 1 No release date - 3 Released after 2026-11-01`. 0: off |
+| `--monitored yes/any/no` | Only monitored ones (the default), either, or only unmonitored ones |
+
+For Sonarr, `cutoff` and `missing` search just the episodes listed there, not the whole series, as Sonarr's own Wanted search does.
+
+## Max add
+
+Rather than grabbing a whole batch's worth in one go, a run can stop once N of its searches have grabbed something (an upgrade, or a missing one). Set it with `SONARR_UPGRADE_MAX_ADD` / `RADARR_UPGRADE_MAX_ADD` (or `--max-add N`). Handy when a lot could be upgraded and you'd rather the downloads come over time.
+
+- With a batch of 20 and a max add of 3: if the 5th search is the third to grab something, the run stops there. The other 15 aren't searched or tagged, so the next runs search them.
+- A series counts once, however many releases its search grabbed.
+- The summary and the Discord post end with `Max add 3 reached: stopped with 15 movies of the batch left, searched next time`.
+- A dry run can't know what a search would grab, so it lists the whole batch.
+- Leave it empty, or set it to 0, for no limit. Named sets have their own: `SONARR_ANIME_UPGRADE_MAX_ADD`.
+
+## Guards
+
+Always on:
+
+- One with a download in the arr's queue (downloading, or waiting or stuck importing) under 72 hours old is left alone, so it never grabs a second copy.
+- The run is skipped while the arr already has 3 or more searches queued.
+- Only ones whose search finished are tagged. A search still going after 10 minutes stops the run there; the next run tags it once it's finished.
+
+## Several Sonarrs or Radarrs
+
+Set up as for `arr_rename.py` (`SONARR_ANIME_URL`, ...). A run searches every one of the arr it's given (`sonarr` or `radarr`, first) in turn; `--instance NAME` picks one (`main` for the plain `SONARR_URL` one).
+
+Each one can have its own settings in `.env`, `<PREFIX>_UPGRADE_<SETTING>`: `SONARR_UPGRADE_COUNT=5`, `SONARR_ANIME_UPGRADE_MODE=cutoff`. The settings are `COUNT`, `SEARCH_TAG`, `TAGS`, `QUALITY_PROFILES` (these two comma-separated, each name with or without quotes: `"SQP-1 WEB (1080p)", "SQP-2 WEB (1080p)"`), `IGNORE_TAG`, `AGE`, `MONITORED`, `MODE` and `MAX_ADD`. An option given on the command line wins, for every one. A setting that can't be read stops that one, and says why.
+
+## Usage
+```bash
+./arr_upgrade_search.py sonarr --count 10          # dry run: what it would search
+./arr_upgrade_search.py sonarr --count 10 --apply  # search the next 10 series
+./arr_upgrade_search.py radarr --mode cutoff --apply   # as many as RADARR_UPGRADE_COUNT says
+./arr_upgrade_search.py radarr --count 20 --max-add 3 --apply   # stop once 3 have grabbed something
+./arr_upgrade_search.py radarr --quality-profile "HD-1080p" --age 30 --apply   # only ones out 30 days or more
+```
+
+Everything printed is also saved to `logs/arr_upgrade_search.log`.
+
+## Discord
+
+With `DISCORD_WEBHOOK_URL` (or `--discord-webhook`), each run posts its report. The summary says how far through the library it is `Searched 5 movies this run; total 5 of 16 movies searched, 11 left to search, 3 more runs at 5 a run`, or at the end of a turn `... next run starts over`. Then come the counts, `5 Searched; 2 Grabbed` (and `; 1 Failed`; which ones is in the log), then the limits, then `Imported: 1 of 3 grabs from previous run` (of the earlier grabs still waiting to import, how many have since; which ones is in the log), the lists (failed, held back, and earlier grabs that didn't import), then a block for each grab (earlier grabs that have imported since are only counted; the log says what each one was):
+
+````
+**Alien (1979)**
+Release Name: Alien.1979.2160p.UHD.BluRay.REMUX.HDR-FGT
+```diff
+- WEBDL-1080p
+- CF: HDR10, DD+ 5.1
+- Score: 100
++ Remux-2160p
++ CF: DV HDR10, TrueHD Atmos, Remux Tier 01
++ Score: 2050
+```
+````
+
+In red the quality, custom formats and custom format score of what it replaces, in green what was grabbed. A side with no custom formats has no `CF:` line. It pings `DISCORD_USER_ID` (or `--discord-user`) about what `--discord-ping` names, comma-separated: `failed` (the default), `grabbed`, `imported` (an earlier grab imported, or didn't) and `rotated` (it's searched them all and starts over), or `none`.
