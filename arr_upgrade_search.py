@@ -51,7 +51,7 @@ Guards, always on:
   - one whose search the arr says failed 3 runs in a row is tagged anyway, so the turn can end (searched again next
     turn); one the arr couldn't be reached for isn't counted
 
-Each grab is remembered (--state, a JSON file), and each run after says which imported since, at what
+Each grab is remembered (in a JSON file of each Sonarr's or Radarr's own, in --state), and each run after says which imported since, at what
 quality and custom format score, and which failed; one still not imported after 7 days is let go.
 
 Without --apply it's a dry run: it says what it would search, and searches and tags nothing.
@@ -104,7 +104,7 @@ GIVE_UP = 6          # hours that search is waited for by the next runs; then it
 FOLLOW_DAYS = 7      # days a grab is followed for its import
 STUCK = {"importBlocked": "blocked from importing", "importFailed": "import failed", "failedPending": "failed, waiting to be removed"}
 PAGES = 100          # pages of the queue or a wanted list read, at most (500 each)
-STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "arr_upgrade_search_grabs.json")  # --state's default
+STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")  # --state's default: where each one's state file is
 RETRY = 10           # seconds to wait before trying a failed read from the arr again (once)
 
 
@@ -603,6 +603,13 @@ def load_state(path: str) -> dict:
         return {}
 
 
+def own_state(folder: str, prefix: str) -> tuple[str, dict]:
+    """One Sonarr's or Radarr's state file in `folder` (its own, so runs of different ones at once can't overwrite each
+    other's), and what's in it."""
+    path = os.path.join(folder, f"arr_upgrade_search_{prefix}.json")
+    return path, load_state(path)
+
+
 def save_state(path: str, data: dict) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     tmp = path + ".tmp"
@@ -779,7 +786,7 @@ def run(args, app: str, name: str | None) -> int:
         return failed(str(e))
 
     # what became of the grabs of earlier runs (a dry run only looks)
-    state = load_state(args.state)
+    state_path, state = own_state(args.state, prefix)
     pending = state.get(prefix, [])
     try:
         imported, not_imported, still = lib.follow(pending)
@@ -800,7 +807,7 @@ def run(args, app: str, name: str | None) -> int:
         print(f"    STUCK {withyear(g)}: {g['release']}: {g['reason']}")
     if args.apply and (imported or not_imported):
         state[prefix] = still
-        save_state(args.state, state)
+        save_state(state_path, state)
     # of the earlier runs' grabs still waiting to import (last run's, and any older ones not imported yet), how many have
     followed = f"Imported: {len(imported):,} of {plural(len(pending), 'grab')} from previous run" if pending else ""
     if followed:
@@ -828,7 +835,7 @@ def run(args, app: str, name: str | None) -> int:
             state[prefix + FAILS] = fails
         else:
             state.pop(prefix + FAILS, None)
-        save_state(args.state, state)
+        save_state(state_path, state)
 
     def failed_search(ident: int, what: str, status: str) -> str:
         """Count a search the arr says failed; after GIVE_UP_FAILS runs in a row, tag it anyway (searched for this turn), so
@@ -858,7 +865,7 @@ def run(args, app: str, name: str | None) -> int:
                   f": {g['before']} → {g['after']}" + (f"\n            in place of {g['old']}" if g["old"] else ""))
             if g.get("download"):
                 state.setdefault(prefix, []).append({**g, "t": time.time(), "title": item.get("title"), "year": item.get("year")})
-                save_state(args.state, state)
+                save_state(state_path, state)
         if grabs:
             grabbed.append((what, grabs))
 
@@ -881,7 +888,7 @@ def run(args, app: str, name: str | None) -> int:
         if args.apply and not any(i["id"] == going["id"] for i in lib.items):  # (deleted since: nothing left to tag)
             print(f"    {what} is no longer in {app.capitalize()}: its search is let go")
             del state[prefix + SEARCHING]
-            save_state(args.state, state)
+            save_state(state_path, state)
         elif args.apply:
             try:
                 grabs = lib.grabs(going["id"], going["since"], going["before"], going["seen"])
@@ -893,7 +900,7 @@ def run(args, app: str, name: str | None) -> int:
             except OSError as e:
                 return failed(str(e))
             del state[prefix + SEARCHING]
-            save_state(args.state, state)
+            save_state(state_path, state)
             if status in ("completed", "timeout"):
                 finished = what
                 searched.append(what)
@@ -971,7 +978,7 @@ def run(args, app: str, name: str | None) -> int:
                     stopped = what
                     print(f"    still searching after {SEARCH_WAIT} min: tagged once it's finished, and the run stops here")
                     state[prefix + SEARCHING] = unfinished
-                    save_state(args.state, state)
+                    save_state(state_path, state)
                 else:
                     why = failed_search(item["id"], what, status)
                     print(f"    FAILED: {why}")
@@ -1074,8 +1081,9 @@ def main(argv=None) -> int:
         p.add_argument("--max-add", type=int, metavar="N",
                        help=f"stop the run once N searches have grabbed something, leaving the rest of the batch untagged "
                             f"for the next runs (default: ${var}_UPGRADE_MAX_ADD; 0 or unset: no limit)")
-        p.add_argument("--state", default=STATE, metavar="FILE", help="where grabs are kept, to say on later runs whether "
-                                                                      "they imported (default logs/arr_upgrade_search_grabs.json)")
+        p.add_argument("--state", default=STATE_DIR, metavar="DIR", help="the folder of each one's state file, "
+                       f"arr_upgrade_search_{var}.json (or ..._{var}_<NAME>.json): its grabs, to say on later runs whether they "
+                       "imported, and a search still going (default: logs, next to the script)")
         p.add_argument("--delay", type=float, default=DELAY, metavar="S", help=f"seconds between searches (default {DELAY:g})")
         p.add_argument("--discord-webhook", default=os.environ.get("DISCORD_WEBHOOK_URL"), metavar="URL",
                        help="post the results to this Discord webhook (default: $DISCORD_WEBHOOK_URL)")
