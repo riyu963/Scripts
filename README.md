@@ -97,7 +97,7 @@ Python 3.9+ (standard library only). It uses the same `.env` as `arr_rename.py`.
 How many it searches a run has to be set: `SONARR_UPGRADE_COUNT` / `RADARR_UPGRADE_COUNT` (`SONARR_ANIME_UPGRADE_COUNT` for a named one), or `--count N` for every one. A Sonarr or Radarr without one isn't searched.
 
 - Each run searches the next `SONARR_UPGRADE_COUNT` / `RADARR_UPGRADE_COUNT` (or `--count N`; 1 to 500) monitored series or movies that are out, in title order. Sonarr gets a series search, Radarr a movie search.
-- Each one searched is tagged `upgrade-searched` (`--search-tag`; created if it isn't there) The run that searches the last film/series takes the tag off them all, so the next run starts over from the top. Failed searches aren't tagged and left for the next run.
+- Each one searched is tagged `upgrade-searched` (`--search-tag`; created if it isn't there) The run that searches the last film/series takes the tag off them all, so the next run starts over from the top. Failed searches aren't tagged and left for the next run; one the arr says failed 3 runs in a row is tagged anyway, so the turn can end (it's searched again next turn). One the arr can't be reached for isn't counted.
 - After each search it reads what the arr grabbed from its history, and shows each grab old against new: the file (or season pack) it replaces, with its quality and custom format score, then what was grabbed.
 - Each grab is remembered in `logs/arr_upgrade_search_grabs.json`, and the next runs say whether it imported (and at what quality and score) or failed. One still not imported after 7 days is let go. One whose download is stuck in the arr's queue (blocked from importing, failed to import, or with a warning) is listed under `Stuck in the queue`, with the arr's own reason, each run until it imports or is let go.
 - Without `--apply` it's a dry run: it says what it would search, and searches and tags nothing.
@@ -111,7 +111,7 @@ How many it searches a run has to be set: `SONARR_UPGRADE_COUNT` / `RADARR_UPGRA
 | `--mode missing` | Only missing ones (Wanted > Missing) |
 | `--tag NAME` | Only those with this tag (repeat it for any of several) |
 | `--ignore-tag TAG` | Leave those with this tag alone (default: `SONARR_UPGRADE_IGNORE_TAG` / `RADARR_UPGRADE_IGNORE_TAG`). A tag the arr hasn't got stops the run, and says why, as in `arr_rename.py`; so does one that's also the search tag |
-| `--search-tag TAG` | The tag that marks one searched (default: `SONARR_UPGRADE_SEARCH_TAG` / `RADARR_UPGRADE_SEARCH_TAG`, or `upgrade-searched`). It can't be the ignore tag or either of `arr_rename.py`'s tags (`SONARR_RENAME_TAG`, default `rename-checked`, and `SONARR_IGNORE_TAG`); with one of them the run doesn't start, and says why |
+| `--search-tag TAG` | The tag that marks one searched (default: `SONARR_UPGRADE_SEARCH_TAG` / `RADARR_UPGRADE_SEARCH_TAG`, or `upgrade-searched`). It can only have letters, digits and `-` (the arr won't make any other tag), and can't be one of the `--tag` limits, the ignore tag or either of `arr_rename.py`'s tags (`SONARR_RENAME_TAG`, default `rename-checked`, and `SONARR_IGNORE_TAG`); with one of them the run doesn't start, and says why |
 | `--quality-profile NAME` | Only those with this quality profile |
 | `--age DAYS` | Only those released DAYS days ago or more: with 5 on 20 November, those released on 15 November or before (a movie: the earliest of in cinemas, digital and disc; a series: its first episode). One with no release date is left out. Each run's summary says how many it left out: `Skipped: 1 No release date - 3 Released after 2026-11-01`. 0: off |
 | `--monitored yes/any/no` | Only monitored ones (the default), either, or only unmonitored ones |
@@ -132,9 +132,10 @@ Rather than grabbing a whole batch's worth in one go, a run can stop once N of i
 
 Always on:
 
-- One with a download in the arr's queue (downloading, or waiting or stuck importing) under 72 hours old is left alone, so it never grabs a second copy.
+- One with a download in the arr's queue (downloading, or waiting or stuck importing) under 72 hours old is left alone, so it never grabs a second copy. The next one takes its place in the batch; the report lists it under `Held back` only if the run got to it, so not one after where max add (or a search still going) stopped the run.
 - The run is skipped while the arr already has 3 or more searches queued.
-- Only ones whose search finished are tagged. A search still going after 10 minutes stops the run there; the next run tags it once it's finished.
+- Only ones whose search finished are tagged. A search still going after 10 minutes stops the run there; the next run tags it once it's finished (or lets it go, if it's been deleted from the arr since).
+- A search the arr says failed 3 runs in a row is tagged anyway, so one that always fails can't keep the turn from ending.
 
 ## Several Sonarrs or Radarrs
 

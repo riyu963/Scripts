@@ -42,11 +42,14 @@ run can't know what a search would grab, so it lists the whole batch.
 
 Guards, always on:
   - the ones with a download in the arr's queue (downloading, or waiting or stuck importing) under 72 hours old
-    are left alone, so it never grabs a second copy
+    are left alone, so it never grabs a second copy (the next one takes its place in the batch; one is listed as
+    held back only if the run got to it: not one after where max add, or a search still going, stopped it)
   - the run is skipped while the arr already has 3 or more searches queued
   - only the ones whose search finished are tagged: one still going after 10 minutes stops the run, so the rest is
     searched next time, and the next run tags it (and says what it grabbed) once it's finished, skipping the run
     while it isn't
+  - one whose search the arr says failed 3 runs in a row is tagged anyway, so the turn can end (searched again next
+    turn); one the arr couldn't be reached for isn't counted
 
 Each grab is remembered (--state, a JSON file), and each run after says which imported since, at what
 quality and custom format score, and which failed; one still not imported after 7 days is let go.
@@ -95,6 +98,8 @@ SEARCHES = ("SeriesSearch", "SeasonSearch", "EpisodeSearch", "MissingEpisodeSear
 BUSY = ("queued", "started")
 POLL = 2.0           # seconds between checks on a search
 SEARCHING = "_SEARCHING"  # --state's key (after the prefix) for the search a run stopped at, still going
+FAILS = "_FAILS"     # --state's key (after the prefix) for how many runs in a row each one's search has failed
+GIVE_UP_FAILS = 3    # runs in a row a search can fail (the arr saying so) before it's tagged anyway, so the turn can end
 GIVE_UP = 6          # hours that search is waited for by the next runs; then it's taken as done
 FOLLOW_DAYS = 7      # days a grab is followed for its import
 STUCK = {"importBlocked": "blocked from importing", "importFailed": "import failed", "failedPending": "failed, waiting to be removed"}
@@ -516,8 +521,12 @@ class Library:
         it if they're still going: {"id", "title", "year", "commands", "since", "before", "seen" (the releases
         reported already), "t"}."""
         before = self.snapshot(item)  # (before the search: a grab can import while it's still searching)
-        since = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0) - datetime.timedelta(seconds=2)
-        started = [self.arr.call("POST", "/api/v3/command", body)["id"] for body in self.commands(item, episodes)]
+        local = datetime.datetime.now(datetime.timezone.utc)
+        replies = [self.arr.call("POST", "/api/v3/command", body) for body in self.commands(item, episodes)]
+        started = [r["id"] for r in replies]
+        # (from when the arr says it queued the search, by its own clock, as its history is: this machine's may differ)
+        queued = [t for t in (when(r.get("queued")) for r in replies) if t and t.tzinfo]
+        since = (min(queued) if queued else local).replace(microsecond=0) - datetime.timedelta(seconds=2)
         status = self.wait(started, limit)
         if status not in ("completed", "timeout"):
             print(f"    the arr's search ended {status} (see System > Tasks in the arr)")
@@ -704,6 +713,12 @@ def limits_for(args, prefix: str) -> dict:
         raise CouldntStart(f"how many to search each run isn't set: set {prefix}_UPGRADE_COUNT (1 to {MAX_COUNT}), "
                            "or give --count")
     out["tag"] = args.search_tag or own.get("tag") or SEARCH_TAG
+    if not re.fullmatch(r"[a-z0-9-]+", out["tag"].lower()):  # (or the arr refuses to make it: checked before anything's searched)
+        raise CouldntStart(f"the search tag {out['tag']!r} (--search-tag or {prefix}_UPGRADE_SEARCH_TAG) can only have "
+                           "letters, digits and -, as the arr won't make any other tag")
+    if out["tag"].lower() in (t.lower() for t in out.get("tags") or []):
+        raise CouldntStart(f"the search tag {out['tag']!r} can't also be one of the tags searched (--tag or {prefix}_UPGRADE_TAGS), "
+                           "or each turn would only search the ones searched last time")
     out["ignore_tag"] = (args.ignore_tag or own.get("ignore_tag") or "").strip()
     if out["ignore_tag"].lower() == out["tag"].lower():  # (as arr_rename.py refuses it)
         raise CouldntStart(f"the search tag {out['tag']!r} can't also be the ignore tag (--ignore-tag or {prefix}_UPGRADE_IGNORE_TAG), "
@@ -805,7 +820,36 @@ def run(args, app: str, name: str | None) -> int:
         discord_report(args, title, discord_escape(summary) + f"\nLimits: {discord_escape(limits_text(limits))}"
                        + (f"\n{followed}" if followed else ""), fields, color, reasons)
 
-    searched, grabbed, problems, stopped = [], [], [], None
+    searched, grabbed, problems, stopped, gave_up = [], [], [], None, []
+    fails = state.get(prefix + FAILS) or {}  # {id (as text): failed runs in a row}
+
+    def save_fails() -> None:
+        if fails:
+            state[prefix + FAILS] = fails
+        else:
+            state.pop(prefix + FAILS, None)
+        save_state(args.state, state)
+
+    def failed_search(ident: int, what: str, status: str) -> str:
+        """Count a search the arr says failed; after GIVE_UP_FAILS runs in a row, tag it anyway (searched for this turn), so
+        one that always fails can't keep the turn from ending. Returns what the Failed list says."""
+        fails[str(ident)] = fails.get(str(ident), 0) + 1
+        why = f"{what}: the search ended {status}"
+        if fails[str(ident)] >= GIVE_UP_FAILS:
+            try:
+                lib.retag([ident], lib.tag_id(limits["tag"], make=True), "add")
+                for i in lib.items:  # (so it isn't picked again below)
+                    if i["id"] == ident:
+                        i["tags"] = [*(i.get("tags") or []), lib.tag_id(limits["tag"])]
+                del fails[str(ident)]
+                gave_up.append(ident)
+                why += f" ({GIVE_UP_FAILS} runs in a row: tagged anyway, so the turn can end; it's searched again next turn)"
+            except OSError as e:
+                why += f" (couldn't tag it after {GIVE_UP_FAILS} failed runs: {e})"
+        else:
+            why += f" ({fails[str(ident)]} of {GIVE_UP_FAILS} runs in a row)"
+        save_fails()
+        return why
 
     def took(item: dict, what: str, grabs: list[dict]) -> None:
         """Report and remember what a search grabbed (each grab followed by the next runs, to say whether it imported)."""
@@ -834,7 +878,11 @@ def run(args, app: str, name: str | None) -> int:
             return 0
         print(f"The last run's search of {what} " + (f"is still going after {GIVE_UP} hours: taken as done" if status == "timeout"
                                                        else f"has ended ({status})"))
-        if args.apply:
+        if args.apply and not any(i["id"] == going["id"] for i in lib.items):  # (deleted since: nothing left to tag)
+            print(f"    {what} is no longer in {app.capitalize()}: its search is let go")
+            del state[prefix + SEARCHING]
+            save_state(args.state, state)
+        elif args.apply:
             try:
                 grabs = lib.grabs(going["id"], going["since"], going["before"], going["seen"])
                 if status in ("completed", "timeout"):
@@ -849,9 +897,11 @@ def run(args, app: str, name: str | None) -> int:
             if status in ("completed", "timeout"):
                 finished = what
                 searched.append(what)
+                if fails.pop(str(going["id"]), None) is not None:
+                    save_fails()
                 took(going, what, grabs)
             else:
-                problems.append(f"{what}: the search ended {status}")
+                problems.append(failed_search(going["id"], what, status))
     try:
         backlog = lib.busy()
     except OSError as e:
@@ -878,14 +928,16 @@ def run(args, app: str, name: str | None) -> int:
             except OSError as e:
                 return failed(f"couldn't take the {limits['tag']} tag off: {e}")
         untagged = pool
-    waiting = [i for i in untagged if i["id"] in held]  # (left for a run after its download's done)
-    left = [i for i in untagged if i["id"] not in held]
-    picked = left[:count]
+    batch, picked = [], []  # (in title order: the next `count` to search, with those held back on the way among them)
+    for i in untagged:
+        if len(picked) == count:
+            break
+        batch.append(i)
+        if i["id"] not in held:
+            picked.append(i)
     print(f"{plural(len(pool), lib.noun, lib.nouns)} within the limits, {len(untagged):,} not searched yet in this turn"
-          + (f" ({len(waiting):,} with a download in the queue, left for now)" if waiting else "")
           + f"; {'searching' if args.apply else 'would search'} {len(picked):,}")
-    for item in waiting:
-        print(f"    HELD BACK {lib.name(item)}: {held[item['id']]}")
+    waiting = []  # (those held back that the run got to: one after where it stopped wasn't to be searched this run)
     if args.apply and picked:
         try:
             tag = lib.tag_id(limits["tag"], make=True)
@@ -893,17 +945,23 @@ def run(args, app: str, name: str | None) -> int:
             return failed(f"couldn't make the {limits['tag']} tag: {e}")
     most = int(limits["max_add"])
     capped = None  # with --max-add: how many of the batch were left unsearched once it was reached
-    for n, item in enumerate(picked):
+    n = 0  # (searches started this run)
+    for item in batch:
         what = lib.name(item)
         if args.apply and most and len(grabbed) >= most:  # enough grabbed: the rest of the batch is for the next runs
             capped = len(picked) - n
             print(f"    max add {most} reached: the other {plural(capped, lib.noun, lib.nouns)} of this batch are searched next time")
             break
+        if item["id"] in held:  # (left for a run after its download's done; the next one takes its place in the batch)
+            waiting.append(item)
+            print(f"    HELD BACK {what}: {held[item['id']]}")
+            continue
+        n += 1
         if not args.apply:
             print(f"    WOULD SEARCH {what}")
             searched.append(what)
             continue
-        if n:
+        if n > 1:
             time.sleep(args.delay)
         print(f"    SEARCH {what}")
         try:
@@ -915,9 +973,14 @@ def run(args, app: str, name: str | None) -> int:
                     state[prefix + SEARCHING] = unfinished
                     save_state(args.state, state)
                 else:
-                    raise OSError(f"the search ended {status}")
+                    why = failed_search(item["id"], what, status)
+                    print(f"    FAILED: {why}")
+                    problems.append(why)
+                    continue
             else:
                 lib.retag([item["id"]], tag, "add")  # (searched, whatever it found)
+                if fails.pop(str(item["id"]), None) is not None:
+                    save_fails()
         except OSError as e:
             print(f"    FAILED: {e}")
             problems.append(f"{what}: {e}")
@@ -928,7 +991,8 @@ def run(args, app: str, name: str | None) -> int:
         if stopped:
             break
         searched.append(what)
-    remaining = max(0, len(untagged) - len(searched) + (finished is not None))  # (the last run's one was tagged before untagged was counted)
+    remaining = max(0, len(untagged) - len(searched) - len([i for i in untagged if i["id"] in gave_up])
+                    + (finished is not None))  # (the last run's one was tagged before untagged was counted)
     untag_failed = ""
     if args.apply and pool and not remaining and not stopped:
         # the run that searches the last of them takes the tag off them all, as arr_rename.py does, so the next run starts
