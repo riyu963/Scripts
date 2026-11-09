@@ -80,7 +80,8 @@ import urllib.parse
 import urllib.request
 from collections import Counter
 
-PINGS = {"failed": "the run fails", "grabbed": "an upgrade is grabbed", "imported": "an upgrade it grabbed imports, or doesn't",
+PINGS = {"failed": "the run fails", "grabbed": "an upgrade is grabbed", "imported": "an upgrade it grabbed imports",
+         "import_failed": "one it grabbed doesn't import, or is stuck in the queue",
          "rotated": "it's searched them all and starts over"}
 DEFAULT_PINGS = ("failed",)
 SEARCH_TAG = "upgrade-searched"  # what marks one searched in this turn through the library
@@ -822,8 +823,8 @@ def run(args, app: str, name: str | None) -> int:
                                 [f"{withyear(g)}: {g['release']}: {g['reason']}" for g in stuck])
         fields += blocks
         reasons = reasons + ([("imported", f"{plural(len(imported), 'upgrade')} imported")] if imported else []) + (
-            [("imported", f"{plural(len(not_imported), 'grab')} didn't import")] if not_imported else []) + (
-            [("imported", f"{plural(len(stuck), 'grab')} stuck in the queue")] if stuck else [])
+            [("import_failed", f"{plural(len(not_imported), 'grab')} didn't import")] if not_imported else []) + (
+            [("import_failed", f"{plural(len(stuck), 'grab')} stuck in the queue")] if stuck else [])
         discord_report(args, title, discord_escape(summary) + f"\nLimits: {discord_escape(limits_text(limits))}"
                        + (f"\n{followed}" if followed else ""), fields, color, reasons)
 

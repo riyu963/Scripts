@@ -171,4 +171,4 @@ Release Name: Alien.1979.2160p.UHD.BluRay.REMUX.HDR-FGT
 ```
 ````
 
-In red the quality, custom formats and custom format score of what it replaces, in green what was grabbed. A side with no custom formats has no `CF:` line. It pings `DISCORD_USER_ID` (or `--discord-user`) about what `--discord-ping` names, comma-separated: `failed` (the default), `grabbed`, `imported` (an earlier grab imported, or didn't) and `rotated` (it's searched them all and starts over), or `none`.
+In red the quality, custom formats and custom format score of what it replaces, in green what was grabbed. A side with no custom formats has no `CF:` line. It pings `DISCORD_USER_ID` (or `--discord-user`) about what `--discord-ping` names, comma-separated: `failed` (the default), `grabbed`, `imported` (an earlier grab imported), `import_failed` (an earlier grab didn't import, or is stuck in the queue) and `rotated` (it's searched them all and starts over), or `none`.
