@@ -550,6 +550,7 @@ class Library:
             files = before["files"]
             old = was(files, self.releases(item, files))
             return [{"release": g.get("sourceTitle") or "?", "before": describe(files), "after": describe([g]), "old": old,
+                     "old_files": sorted(file_name(f) for f in files),
                      "before_cfs": formats(files), "after_cfs": formats([g]),
                      "quality": quality(g), "score": score(g), "episodes": "", "download": g.get("downloadId") or ""} for g in grabs]
         # a season pack is one grab for each of its episodes: one grab, each episode's file before it
@@ -564,6 +565,7 @@ class Library:
             mine = [eps[g["episodeId"]] for g in gs if g.get("episodeId") in eps]
             before_files = [files[e["episodeFileId"]] for e in mine if e.get("episodeFileId") in files]
             out.append({"release": release, "before": describe(before_files), "after": describe([gs[0]]), "old": was(before_files, names),
+                        "old_files": sorted(file_name(f) for f in before_files),
                         "before_cfs": formats(before_files), "after_cfs": formats(gs[:1]),
                         "quality": quality(gs[0]), "score": score(gs[0]), "episodes": episodes_text(mine),
                         "download": gs[0].get("downloadId") or ""})
@@ -864,8 +866,16 @@ def run(args, app: str, name: str | None) -> int:
         for g in grabs:
             print(f"        GRABBED {g['release']}" + (f" ({g['episodes']})" if g["episodes"] else "") +
                   f": {g['before']} → {g['after']}" + (f"\n            in place of {g['old']}" if g["old"] else ""))
+            # (in full: the Discord post may leave some out, as "… and N more")
+            if len(g.get("old_files") or []) > 1:
+                print("            files replaced:" + "".join(f"\n              {f}" for f in g["old_files"]))
+            if g.get("before_cfs"):
+                print(f"            old CF: {', '.join(g['before_cfs'])}")
+            if g.get("after_cfs"):
+                print(f"            new CF: {', '.join(g['after_cfs'])}")
             if g.get("download"):
-                state.setdefault(prefix, []).append({**g, "t": time.time(), "title": item.get("title"), "year": item.get("year")})
+                kept = {k: v for k, v in g.items() if k != "old_files"}  # (the state file needn't keep every file's name)
+                state.setdefault(prefix, []).append({**kept, "t": time.time(), "title": item.get("title"), "year": item.get("year")})
                 save_state(state_path, state)
         if grabs:
             grabbed.append((what, grabs))
@@ -909,7 +919,9 @@ def run(args, app: str, name: str | None) -> int:
                     save_fails()
                 took(going, what, grabs)
             else:
-                problems.append(failed_search(going["id"], what, status))
+                why = failed_search(going["id"], what, status)
+                print(f"    FAILED: {why}")
+                problems.append(why)
     try:
         backlog = lib.busy()
     except OSError as e:
