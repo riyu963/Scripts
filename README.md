@@ -176,3 +176,90 @@ Release Name: Alien.1979.2160p.UHD.BluRay.REMUX.HDR-FGT
 ````
 
 In red the quality, custom formats and custom format score of what it replaces, in green what was grabbed. A side with no custom formats has no `CF:` line. It pings `DISCORD_USER_ID` (or `--discord-user`) about what `--discord-ping` names, comma-separated: `failed` (the default), `grabbed`, `imported` (an earlier grab imported), `import_failed` (an earlier grab didn't import, or is stuck in the queue) and `rotated` (it's searched them all and starts over), or `none`.
+
+# arr_blocklist_cleanup.py
+
+Keeps Sonarr's and Radarr's blocklists down in size, removing the entries the rules pick through the arr itself.
+
+Python 3.9+ (standard library only). It uses the same `.env` as `arr_rename.py`.
+
+Removing an entry lets the arr grab that release again, so nothing is removed unless a rule says so: a Sonarr or Radarr with no rules set is left alone, and the run says so.
+
+## Rules
+
+Any of them together; an entry any of them picks is removed. Each can be set for every one on the command line, or for each Sonarr or Radarr as `<PREFIX>_BLOCKLIST_<RULE>` (`SONARR_BLOCKLIST_OLDER_THAN=90`, `SONARR_ANIME_BLOCKLIST_KEEP=3`). Numbers: 0 or empty is off.
+
+| Option | Setting | Removes |
+| --- | --- | --- |
+| `--older-than DAYS` | `..._BLOCKLIST_OLDER_THAN` | Entries blocklisted more than DAYS days ago. By then indexers have mostly dropped the release, so it's the safest rule |
+| `--keep N` | `..._BLOCKLIST_KEEP` | All but the newest N entries for each movie (Radarr), or each episode or pack (Sonarr: entries for the same episodes) |
+| `--max N` | `..._BLOCKLIST_MAX` | The oldest entries, until at most N are left in all (counted after the other rules) |
+| `--orphans` | `..._BLOCKLIST_ORPHANS=yes` | Entries for a movie or series no longer in the arr |
+
+Without `--apply` it's a dry run: it says what it would remove, and removes nothing.
+
+Guards, always on:
+
+- `--orphans` doesn't run while the arr says it has no movies or series at all, and `--orphan-indexer` doesn't run while it says it has no indexers (as while it starts up, or Prowlarr syncs): either would take every entry for an orphan. The run stops and says why.
+- If removing entries fails partway, those it couldn't remove are listed as `Not removed (the delete failed)`, in the log and the Discord post, and the run ends with an error.
+
+## Advanced options
+
+For the indexers entries came from. They're left out of `.env.example`; set them on the command line, or add them to your `.env` yourself (below). Indexers are matched by their name in the arr, any case; one synced from Prowlarr has ` (Prowlarr)` on the end.
+
+| Option | Setting | Does |
+| --- | --- | --- |
+| `--orphan-indexer` | `..._BLOCKLIST_ORPHAN_INDEXER=yes` | A rule: removes entries from an indexer no longer in the arr. By name, so a renamed indexer counts as gone; an entry with no indexer recorded is left alone |
+| `--indexer NAME` | `..._BLOCKLIST_INDEXERS` | Only looks at entries from this indexer (repeat it, or comma-separate the setting, for any of several) |
+| `--ignore-indexer NAME` | `..._BLOCKLIST_IGNORE_INDEXERS` | Never looks at entries from this indexer (repeat it, or comma-separate the setting, for several) |
+
+> [!NOTE]
+> `--orphan-indexer` matches indexers **by name only**: a blocklist entry records the name of the indexer it came from, not its id. So **renaming an indexer** in the arr (or in Prowlarr, which renames it in the arr) makes every entry blocklisted under its old name look like it's from an indexer that's gone, and the next run removes them all. Run a dry run first after renaming an indexer, to see what it would remove.
+
+- `--keep` can't be used with any of them: it keeps each movie's (or episode's) newest entries from every indexer. `--orphan-indexer` can't be used with `--indexer` or `--ignore-indexer` either: it's for whichever indexers are gone. With one of these the run stops, and says why.
+- With `--indexer` or `--ignore-indexer`, `--max` counts only the entries looked at.
+- A name no entry has is warned about, with the names the blocklist does have.
+
+In `.env`, for example:
+
+```bash
+# Radarr: entries older than 30 days, only from HD-Torrents and FileList
+RADARR_BLOCKLIST_OLDER_THAN=30
+RADARR_BLOCKLIST_INDEXERS=HD-Torrents,FileList
+# Sonarr: entries older than 90 days from any indexer but NZBgeek (Prowlarr)
+SONARR_BLOCKLIST_OLDER_THAN=90
+SONARR_BLOCKLIST_IGNORE_INDEXERS=NZBgeek (Prowlarr)
+# Sonarr Anime: entries from indexers it no longer has
+SONARR_ANIME_BLOCKLIST_ORPHAN_INDEXER=yes
+```
+
+## Usage
+```bash
+./arr_blocklist_cleanup.py radarr --older-than 90                  # dry run: what it would remove
+./arr_blocklist_cleanup.py radarr --older-than 90 --apply
+./arr_blocklist_cleanup.py sonarr --older-than 90 --keep 5 --orphans --apply
+./arr_blocklist_cleanup.py sonarr --instance anime --max 500 --apply
+./arr_blocklist_cleanup.py radarr --older-than 30 --indexer "HD-Torrents" --apply   # only HD-Torrents' entries
+```
+
+Everything printed is also saved to `logs/arr_blocklist_cleanup.log`.
+
+## Discord
+
+With `DISCORD_WEBHOOK_URL` (or `--discord-webhook`), each run posts its report: `Removed 4 of 7 entries · 3 left`, the limits (`Limits: older than 90 days, keep 2 per movie`), then a block for each movie or series with entries removed (or that would be), each under the rule that picked it:
+
+````
+**Alien (1979)**
+```diff
+Older than 90 days:
+- Alien.1979.1080p.WEB-DL-GRP
+  Indexer · torrent
+  200 days ago: Manually marked as failed
+Over keep threshold:
+- Alien.1979.2160p.WEB-DL-GRP
+  Indexer · torrent
+  5 days ago: Download failed
+```
+````
+
+In red the release removed, then the indexer it came from and torrent or usenet, then how long ago it was blocklisted and why (the arr's message). The log also has each one's episodes (Sonarr), quality and custom formats. An entry for a movie or series no longer in the arr is headed `Not in Radarr (id 99)`. Every movie or series gets its block, over as many messages as it takes; one with more removals than fit in its block says `… and 13 more` (the log lists them all). It pings `DISCORD_USER_ID` (or `--discord-user`) about what `--discord-ping` names, comma-separated: `failed` (the default) and `removed` (entries were removed), or `none`.
