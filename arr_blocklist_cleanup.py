@@ -136,6 +136,36 @@ def settings(app: str, name: str | None) -> tuple[str, str]:
             app.capitalize() + (f" {name.title()}" if name else ""))
 
 
+def check_app(arr, url: str, app: str, label: str) -> None:
+    """Make sure `url` is the arr it's set up as (`app`, "sonarr" or "radarr"), as arr_rename.py does: another arr's
+    URL, or one with /api/v3 on the end, would otherwise fail on its first request with only a bare 404. Raises
+    CouldntStart if not, OSError if it can't be reached."""
+    try:
+        system = arr.get("/api/v3/system/status")
+    except OSError as e:
+        if isinstance(e.__cause__, urllib.error.HTTPError) and e.__cause__.code == 404:
+            raise CouldntStart(f"{url} doesn't look like {label}: it has no /api/v3/system/status ({e})") from e
+        raise
+    name = str(system.get("appName") or "") if isinstance(system, dict) else ""
+    if name.lower() != app:
+        raise CouldntStart(f"{url} is {f'{name}, ' if name else ''}not {label}")
+
+
+def bad_discord_user(args, title: str) -> None:
+    """A Discord user id that isn't one doesn't stop the run: it's logged, posted (red, with no ping, as nobody can
+    be), and the run goes on without pings."""
+    reason = (f"the Discord user id (DISCORD_USER_ID or --discord-user) must be a number (Copy User ID in Discord), "
+              f"not {args.discord_user!r}: nobody is pinged until it's fixed. The run goes on")
+    print(f"WARNING: {reason}", file=sys.stderr)
+    args.discord_user = None
+    if args.discord_webhook:
+        try:
+            discord_send(args.discord_webhook, title, f"**Discord setting problem:** {discord_escape(reason)}", [], RED,
+                         script_footer(__file__))
+        except Exception as e:  # (a Discord problem mustn't stop the run)
+            print(f"WARNING: couldn't post to Discord: {e if isinstance(e, OSError) else repr(e)}", file=sys.stderr)
+
+
 def full_url(url: str) -> str:
     """`url` with http:// in front if it has no http:// or https://: "192.168.1.10:8989" is
     http://192.168.1.10:8989."""
@@ -340,6 +370,7 @@ def run(args, app: str, name: str | None) -> int:
         return 0
     arr = Arr(full_url(url), key)
     try:
+        check_app(arr, url, app, label)
         entries = []
         for page in range(1, PAGES + 1):
             got = arr.get("/api/v3/blocklist", page=page, pageSize=PAGE, sortKey="date", sortDirection="descending")
@@ -350,7 +381,7 @@ def run(args, app: str, name: str | None) -> int:
         entries = list({e["id"]: e for e in entries}.values())
         items = arr.get("/api/v3/movie" if app == "radarr" else "/api/v3/series")
         indexers = {str(i.get("name") or "").strip().lower() for i in arr.get("/api/v3/indexer")} if rules["orphan_indexer"] else set()
-    except OSError as e:
+    except (OSError, CouldntStart) as e:
         return failed(str(e))
     things = "movies" if app == "radarr" else "series"
     if rules["orphans"] and entries and not items:
@@ -471,19 +502,24 @@ def main(argv=None) -> int:
     for option in ("older_than", "keep", "max"):
         if getattr(args, option) is not None and getattr(args, option) < 0:
             ap.error(f"--{option.replace('_', '-')} must be 0 or more")
-    if args.discord_user and not args.discord_user.isdigit():
-        ap.error(f"the Discord user id must be a number (Copy User ID in Discord), not {args.discord_user!r}")
     try:
         args.discord_ping = pings(args.discord_ping, PINGS, DEFAULT_PINGS)
     except ValueError as e:
         ap.error(str(e))
     names = instances(args.app)
     if args.instance:
-        names = [None if args.instance.lower() == "main" else args.instance.lower()]
+        name = None if args.instance.lower() == "main" else args.instance.lower()
+        if name not in names:  # (as arr_rename.py says it)
+            ap.error(f"no {args.app.capitalize()} called {args.instance!r}: set {settings(args.app, name)[0]}_URL "
+                     f"(set up: {', '.join(n or 'main' for n in names) or 'none'})")
+        names = [name]
     if not names:
         print(f"No {args.app.capitalize()} set up: set {args.app.upper()}_URL and {args.app.upper()}_API_KEY "
               f"(or {args.app.upper()}_<NAME>_...), e.g. in .env", file=sys.stderr)
         return 1
+    args.discord_user = (args.discord_user or "").strip()  # (blank, or only spaces: no pings, and no warning)
+    if args.discord_user and not args.discord_user.isdigit():
+        bad_discord_user(args, f"{args.app.capitalize()} blocklist cleanup: {'apply' if args.apply else 'dry run'}")
     code = 0
     for n, name in enumerate(names):
         if len(names) > 1:

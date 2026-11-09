@@ -795,8 +795,6 @@ def main(argv=None) -> int:
         ap.error("--count can't be less than 0")
     if args.max_renames is not None and args.max_renames < 0:
         ap.error("--max-renames can't be less than 0")
-    if args.discord_user and not args.discord_user.isdigit():
-        ap.error(f"the Discord user id must be a number (Copy User ID in Discord), not {args.discord_user!r}")
     modes = ["folders"] + (["files"] if args.files else []) + (["tba"] if args.tba else [])
     modes += ["ignore case"] if args.ignore_case else []
     modes += ["ignore punctuation"] if args.ignore_punctuation else []
@@ -815,6 +813,9 @@ def main(argv=None) -> int:
         names = [None]  # --url / --api-key are for one instance: the main one, unless --instance says otherwise
     else:
         names = configured
+    args.discord_user = (args.discord_user or "").strip()  # (blank, or only spaces: no pings, and no warning)
+    if args.discord_user and not args.discord_user.isdigit():
+        bad_discord_user(args, f"{args.app.capitalize()} Renaminatorr: {modes}")
     code, failed = 0, []  # failed: the ones that couldn't start
     for n, name in enumerate(names):
         label = settings(args.app, name)[1]
@@ -849,6 +850,21 @@ def settings(app: str, name: str | None) -> tuple[str, str]:
     Discord name it ("Sonarr" or "Sonarr Anime")."""
     return (app.upper() + (f"_{name.upper()}" if name else ""),
             app.capitalize() + (f" {name.title()}" if name else ""))
+
+
+def bad_discord_user(args, title: str) -> None:
+    """A Discord user id that isn't one doesn't stop the run: it's logged, posted (red, with no ping, as nobody can
+    be), and the run goes on without pings."""
+    reason = (f"the Discord user id (DISCORD_USER_ID or --discord-user) must be a number (Copy User ID in Discord), "
+              f"not {args.discord_user!r}: nobody is pinged until it's fixed. The run goes on")
+    print(f"WARNING: {reason}", file=sys.stderr)
+    args.discord_user = None
+    if args.discord_webhook:
+        try:
+            discord_send(args.discord_webhook, title, f"**Discord setting problem:** {discord_escape(reason)}", [], RED,
+                         script_footer(__file__))
+        except Exception as e:  # (a Discord problem mustn't stop the run)
+            print(f"WARNING: couldn't post to Discord: {e if isinstance(e, OSError) else repr(e)}", file=sys.stderr)
 
 
 def full_url(url: str) -> str:

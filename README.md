@@ -16,6 +16,8 @@ The arr must run on Linux or macOS (or in Docker). An arr running on Windows isn
 
 Copy `.env.example` to `.env` and fill in `SONARR_URL` / `SONARR_API_KEY` and/or `RADARR_URL` / `RADARR_API_KEY`.
 
+A `DISCORD_USER_ID` that isn't a number (copy it with Copy User ID in Discord) doesn't stop a run, in any of the scripts: the log has a warning, Discord a red post without a ping, and the run goes on without pinging anyone.
+
 ## Several Sonarrs or Radarrs
 
 Add named sets to `.env`, such as `SONARR_ANIME_URL` / `SONARR_ANIME_API_KEY` / `SONARR_ANIME_IGNORE_TAG` or `RADARR_4K_URL` / `RADARR_4K_API_KEY`. A run checks the main one, then each named one, with its own log section and Discord post. One that can't start (it can't be reached, say) is reported and skipped, and the others are still checked; a problem once renaming has started stops the run.
@@ -143,7 +145,7 @@ Always on:
 
 ## Several Sonarrs or Radarrs
 
-Set up as for `arr_rename.py` (`SONARR_ANIME_URL`, ...). A run searches every one of the arr it's given (`sonarr` or `radarr`, first) in turn; `--instance NAME` picks one (`main` for the plain `SONARR_URL` one).
+Set up as for `arr_rename.py` (`SONARR_ANIME_URL`, ...). A run searches every one of the arr it's given (`sonarr` or `radarr`, first) in turn; `--instance NAME` picks one (`main` for the plain `SONARR_URL` one); a name that isn't set up stops the run (exit 2), and says which are, in all three scripts.
 
 Each one can have its own settings in `.env`, `<PREFIX>_UPGRADE_<SETTING>`: `SONARR_UPGRADE_COUNT=5`, `SONARR_ANIME_UPGRADE_MODE=cutoff`. The settings are `COUNT`, `SEARCH_TAG`, `TAGS`, `QUALITY_PROFILES` (these two comma-separated, each name with or without quotes: `"SQP-1 WEB (1080p)", "SQP-2 WEB (1080p)"`), `IGNORE_TAG`, `AGE`, `MONITORED`, `MODE` and `MAX_ADD`. An option given on the command line wins, for every one. A setting that can't be read stops that one, and says why.
 
