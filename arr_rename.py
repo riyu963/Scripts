@@ -66,7 +66,7 @@ Batched runs
   batch size with SONARR_RENAME_COUNT / RADARR_RENAME_COUNT (or --count N): each run then checks
   the next N series or movies, in title order, that haven't been checked yet in this pass through
   the library. With --apply or --interactive, each one it checks is tagged SONARR_RENAME_TAG /
-  RADARR_RENAME_TAG (or --checked-tag; default rename-checked, created if the arr hasn't got it),
+  RADARR_RENAME_TAG (or --checked-tag; default rename-checked, made if the arr hasn't got it, in a dry run too),
   so the next run moves on to the next batch. The tag can only have letters, digits and - (the arr
   won't make any other), and can't be the --ignore-tag; with such a tag, the run doesn't start.
   The run that checks the last of them takes the tag off everything, so the next run starts a new
@@ -937,7 +937,7 @@ def run(args, name: str | None, modes: str) -> int:
         print(f"Reading {things} from {app}")
         ignore_tag = None
         tags = {t["label"].lower(): t["id"] for t in arr.get("/api/v3/tag")} if tag_name or count else {}
-        if tag_name and tag_name.lower() not in tags:  # made (in a dry run too), as the checked tag is
+        if tag_name and tag_name.lower() not in tags:  # made, in a dry run too
             if not re.fullmatch(r"[a-z0-9-]+", tag_name.lower()):
                 raise CouldntStart(f"{app} has no tag {tag_name!r}, and can't make it: a tag can only have "
                                    "letters, digits and -")
@@ -949,6 +949,12 @@ def run(args, name: str | None, modes: str) -> int:
         if tag_name:
             ignore_tag = tags[tag_name.lower()]
             print(f"Ignoring {things} tagged {tag_name!r}")
+        if count and checked_tag not in tags:  # (made in a dry run too, as the ignore tag is)
+            try:
+                tags[checked_tag] = arr.call("POST", "/api/v3/tag", {"label": checked_tag})["id"]
+            except OSError as e:
+                raise CouldntStart(f"couldn't make the checked tag {checked_tag!r}: {e}") from e
+            print(f"Made the checked tag {checked_tag!r} (nothing has it yet)")
         roots = root_folders(arr)
 
         def pick(pool):
@@ -1209,17 +1215,14 @@ def run(args, name: str | None, modes: str) -> int:
     # all the next run checks, and the pass would never end
     finished = bool(rounds.get("pool")) and len(tagged) == len(rounds["untagged"])
     if changing and finished:
-        if checked_tag in tags:
-            try:
-                retag(arr, kind, [i["id"] for i in rounds["pool"]], tags[checked_tag], "remove")
-            except Exception as e:  # the renames have happened either way: the next run checks these again, then tries again
-                tag_failed = f"couldn't take the tag {checked_tag!r} off them to start a new pass, so the next run tries again: " \
-                             f"{e if isinstance(e, OSError) else repr(e)}"
-                print(f"WARNING: {tag_failed}", file=sys.stderr)
+        try:
+            retag(arr, kind, [i["id"] for i in rounds["pool"]], tags[checked_tag], "remove")
+        except Exception as e:  # the renames have happened either way: the next run checks these again, then tries again
+            tag_failed = f"couldn't take the tag {checked_tag!r} off them to start a new pass, so the next run tries again: " \
+                         f"{e if isinstance(e, OSError) else repr(e)}"
+            print(f"WARNING: {tag_failed}", file=sys.stderr)
     elif changing and tagged:
         try:
-            if checked_tag not in tags:
-                tags[checked_tag] = arr.call("POST", "/api/v3/tag", {"label": checked_tag})["id"]
             retag(arr, kind, tagged, tags[checked_tag], "add")
         except Exception as e:  # the renames have happened either way: those not tagged are just checked again
             tag_failed = f"couldn't tag them {checked_tag!r}, so the next run checks them again: " \

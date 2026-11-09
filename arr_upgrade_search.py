@@ -3,7 +3,7 @@
 
 Each run searches the next --count series (Sonarr: a series search) or movies (Radarr) that have files,
 are monitored (--monitored says otherwise) and pass the limits, one at a time with a pause between, and
-tags each one searched (--search-tag, made if it isn't there). The run that searches the last one the
+tags each one searched (--search-tag, made if it isn't there, in a dry run too). The run that searches the last one the
 limits allow takes the tag off them all, as arr_rename.py does, so the next run starts over and the whole
 library is searched in turn, however slowly; ones added since are just part of the next turn.
 
@@ -944,7 +944,13 @@ def run(args, app: str, name: str | None) -> int:
         held = lib.queued(SKIP_QUEUED)
     except (OSError, CouldntStart) as e:
         return failed(str(e))
-    tag = lib.tag_id(limits["tag"])
+    made = limits["tag"].lower() not in lib.tags
+    try:  # (made in a dry run too, as the ignore tag is)
+        tag = lib.tag_id(limits["tag"], make=True)
+    except OSError as e:
+        return failed(f"couldn't make the {limits['tag']} tag: {e}")
+    if made:
+        print(f"Made the search tag {limits['tag'].lower()!r} (nothing has it yet)")
     untagged = [i for i in pool if tag not in (i.get("tags") or [])]
     rotated = bool(pool) and not untagged
     if rotated:  # every one searched: take the tag off them and start over
@@ -965,11 +971,6 @@ def run(args, app: str, name: str | None) -> int:
     print(f"{plural(len(pool), lib.noun, lib.nouns)} within the limits, {len(untagged):,} not searched yet in this turn"
           + f"; {'searching' if args.apply else 'would search'} {len(picked):,}")
     waiting = []  # (those held back that the run got to: one after where it stopped wasn't to be searched this run)
-    if args.apply and picked:
-        try:
-            tag = lib.tag_id(limits["tag"], make=True)
-        except OSError as e:
-            return failed(f"couldn't make the {limits['tag']} tag: {e}")
     most = int(limits["max_add"])
     capped = None  # with --max-add: how many of the batch were left unsearched once it was reached
     n = 0  # (searches started this run)
