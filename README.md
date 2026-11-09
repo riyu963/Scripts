@@ -98,7 +98,7 @@ Python 3.9+ (standard library only). It uses the same `.env` as `arr_rename.py`.
 
 ## How it works
 
-How many it searches a run has to be set: `SONARR_UPGRADE_COUNT` / `RADARR_UPGRADE_COUNT` (`SONARR_ANIME_UPGRADE_COUNT` for a named one), or `--count N` for every one. A Sonarr or Radarr without one isn't searched: it's taken as not wanted there, so the log says it's skipped, with no Discord post or ping.
+How many it searches a run has to be set: `SONARR_UPGRADE_COUNT` / `RADARR_UPGRADE_COUNT` (`SONARR_ANIME_UPGRADE_COUNT` for a named one), or `--count N` for every one. A Sonarr or Radarr without one (or with `0`) isn't searched: it's taken as not wanted there, so the log says it's skipped, with no Discord post or ping.
 
 - Each run searches the next `SONARR_UPGRADE_COUNT` / `RADARR_UPGRADE_COUNT` (or `--count N`; 1 to 500) monitored series or movies that are out, in title order. Sonarr gets a series search, Radarr a movie search.
 - Each one searched is tagged `upgrade-searched` (`--search-tag`; made if it isn't there, in a dry run too). The run that searches the last film/series takes the tag off them all, so the next run starts over from the top. Failed searches aren't tagged and left for the next run; one the arr says failed 3 runs in a row is tagged anyway, so the turn can end (it's searched again next turn). One the arr can't be reached for isn't counted.
