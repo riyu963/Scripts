@@ -1,6 +1,10 @@
 # Scripts
 Just random scripts to share
-# arr_rename.py - All vibes don't blame me
+
+> [!WARNING]
+> **All of the code in this repo was written by AI** (Claude), not by hand. It's been tested against real Sonarr and Radarr instances, but read what a script does, and run it without `--apply` first (a dry run), before letting it change your library.
+
+# arr_rename.py
 
 Renames Sonarr series and Radarr movie folders (and their files) that don't match the arr's naming format, through the arr itself, then checks no files went missing. Any problem stops the run.
 
