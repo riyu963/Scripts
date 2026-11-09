@@ -419,7 +419,8 @@ class Library:
     def eligible(self, limits: dict, wanted: dict | None = None) -> list[dict]:
         """The ones that are out (see out) the limits allow (only monitored ones, unless "monitored" says otherwise), by title; with
         `wanted` (see wanted), only those on it (for missing ones, whether they've files or not). Raises CouldntStart
-        for a tag or quality profile the arr hasn't got."""
+        for a tag or quality profile the arr hasn't got. An ignore tag it hasn't got is made (in a dry run too), as the
+        search tag is."""
         def ids(names, table, what):
             out = set()
             for n in names:
@@ -429,9 +430,15 @@ class Library:
             return out
         want = ids(limits.get("tags") or [], self.tags, "tag")
         ignore = limits.get("ignore_tag") or ""
-        if ignore and ignore.lower() not in self.tags:  # (as arr_rename.py says it)
-            raise CouldntStart(f"{self.app.capitalize()} has no tag {ignore!r}, so nothing would be ignored. "
-                               f"Its tags: {', '.join(sorted(self.tags)) or 'none'}")
+        if ignore and ignore.lower() not in self.tags:  # (as arr_rename.py does it)
+            if not re.fullmatch(r"[a-z0-9-]+", ignore.lower()):
+                raise CouldntStart(f"{self.app.capitalize()} has no tag {ignore!r}, and can't make it: a tag can only have "
+                                   "letters, digits and -")
+            try:
+                self.tag_id(ignore, make=True)
+            except OSError as e:
+                raise CouldntStart(f"couldn't make the ignore tag {ignore!r}: {e}") from e
+            print(f"Made the ignore tag {ignore.lower()!r} (nothing has it yet)")
         unwanted = {self.tags[ignore.lower()]} if ignore else set()
         profiles = ids(limits.get("quality_profiles") or [], self.profiles, "quality profile")
         age = int(limits.get("age") or 0)

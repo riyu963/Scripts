@@ -81,7 +81,7 @@ Renames that would lose information (a year, an id tag, the title) are marked **
 | `--tba` | Sonarr only: like `--files`, but only files whose "TBA" episode title now has a real one |
 | `--ignore-case` | Skip folders and files that only differ in capitals |
 | `--ignore-punctuation` | Skip folders and files that only differ in special characters |
-| `--ignore-tag TAG` | Leave items with this tag alone (default: `SONARR_IGNORE_TAG` / `RADARR_IGNORE_TAG`) |
+| `--ignore-tag TAG` | Leave items with this tag alone (default: `SONARR_IGNORE_TAG` / `RADARR_IGNORE_TAG`). A run (a dry run too) makes it if the arr hasn't got it; it can only have letters, digits and `-` |
 | `--count N` | Batched runs: check the next N not checked yet in this pass, tagging each one (default: `SONARR_RENAME_COUNT` / `RADARR_RENAME_COUNT`; 0 or unset: every one) |
 | `--max-renames N` | Rename limit: rename at most N each run, leaving the rest for the next runs (default: `SONARR_RENAME_MAX` / `RADARR_RENAME_MAX`; 0 or unset: no limit) |
 | `--checked-tag TAG` | Batched runs: the tag that marks one checked, letters, digits and `-` only (default: `SONARR_RENAME_TAG` / `RADARR_RENAME_TAG`, or `rename-checked`) |
@@ -114,7 +114,7 @@ How many it searches a run has to be set: `SONARR_UPGRADE_COUNT` / `RADARR_UPGRA
 | `--mode cutoff` | Only those below their quality profile's cutoff (the arr's Wanted > Cutoff Unmet) |
 | `--mode missing` | Only missing ones (Wanted > Missing) |
 | `--tag NAME` | Only those with this tag (repeat it for any of several) |
-| `--ignore-tag TAG` | Leave those with this tag alone (default: `SONARR_UPGRADE_IGNORE_TAG` / `RADARR_UPGRADE_IGNORE_TAG`). A tag the arr hasn't got stops the run, and says why, as in `arr_rename.py`; so does one that's also the search tag |
+| `--ignore-tag TAG` | Leave those with this tag alone (default: `SONARR_UPGRADE_IGNORE_TAG` / `RADARR_UPGRADE_IGNORE_TAG`). A tag the arr hasn't got is made, in a dry run too; one that's also the search tag stops the run, and says why |
 | `--search-tag TAG` | The tag that marks one searched (default: `SONARR_UPGRADE_SEARCH_TAG` / `RADARR_UPGRADE_SEARCH_TAG`, or `upgrade-searched`). It can only have letters, digits and `-` (the arr won't make any other tag), and can't be one of the `--tag` limits, the ignore tag or either of `arr_rename.py`'s tags (`SONARR_RENAME_TAG`, default `rename-checked`, and `SONARR_IGNORE_TAG`); with one of them the run doesn't start, and says why |
 | `--quality-profile NAME` | Only those with this quality profile |
 | `--age DAYS` | Only those released DAYS days ago or more: with 5 on 20 November, those released on 15 November or before (a movie: the earliest of in cinemas, digital and disc; a series: its first episode). One with no release date is left out. Each run's summary says how many it left out: `Skipped: 1 No release date - 3 Released after 2026-11-01`. 0: off |

@@ -58,7 +58,8 @@ Options
   asks you about each one. --apply --force also does the renames that would otherwise need
   --interactive and marks them FORCED. Folders that can't be renamed, 
   for example because their new name is already taken, are still skipped.
-  Series and movies with the tag ignore tag are left alone.
+  Series and movies with the ignore tag are left alone. A run (a dry run too) makes the tag if the
+  arr hasn't got it; it can only have letters, digits and -.
 
 Batched runs
   Rather than checking the whole library every time, each run can check a batch of it. Set the
@@ -101,8 +102,7 @@ Log and Discord
   If a Discord webhook is set (DISCORD_WEBHOOK_URL or --discord-webhook), each run posts a report:
   whether it was a dry run, and one entry per rename (done, or still to do) showing the old and
   new folder name and the file names under it. If the run can't start in a Sonarr or Radarr (it
-  can't be reached, it refuses the API key, its URL or API key isn't set, the --ignore-tag doesn't
-  exist, ...), the reason goes in the log and in a red Discord post, before anything is changed in
+  can't be reached, it refuses the API key, its URL or API key isn't set, ...), the reason goes in the log and in a red Discord post, before anything is changed in
   it, and the run's exit code is 1.
 
 Settings
@@ -899,7 +899,7 @@ def run(args, name: str | None, modes: str) -> int:
             raise CouldntStart(f"{prefix}_RENAME_MAX must be a whole number (0 or more), not {raw!r}")
         most = int(raw or 0)
     checked_tag = (args.checked_tag or os.environ.get(f"{prefix}_RENAME_TAG") or "").strip().lower() or CHECKED_TAG
-    tag_name = args.ignore_tag or os.environ.get(f"{prefix}_IGNORE_TAG")
+    tag_name = (args.ignore_tag or os.environ.get(f"{prefix}_IGNORE_TAG") or "").strip()
     if count and not re.fullmatch(r"[a-z0-9-]+", checked_tag):  # or the arr refuses to make it, and no run ever moves on
         raise CouldntStart(f"the checked tag {checked_tag!r} (--checked-tag or {prefix}_RENAME_TAG) can only have "
                            "letters, digits and -, as the arr won't make any other tag")
@@ -937,10 +937,16 @@ def run(args, name: str | None, modes: str) -> int:
         print(f"Reading {things} from {app}")
         ignore_tag = None
         tags = {t["label"].lower(): t["id"] for t in arr.get("/api/v3/tag")} if tag_name or count else {}
+        if tag_name and tag_name.lower() not in tags:  # made (in a dry run too), as the checked tag is
+            if not re.fullmatch(r"[a-z0-9-]+", tag_name.lower()):
+                raise CouldntStart(f"{app} has no tag {tag_name!r}, and can't make it: a tag can only have "
+                                   "letters, digits and -")
+            try:
+                tags[tag_name.lower()] = arr.call("POST", "/api/v3/tag", {"label": tag_name.lower()})["id"]
+            except OSError as e:
+                raise CouldntStart(f"couldn't make the ignore tag {tag_name!r}: {e}") from e
+            print(f"Made the ignore tag {tag_name.lower()!r} (nothing has it yet)")
         if tag_name:
-            if tag_name.lower() not in tags:
-                raise CouldntStart(f"{app} has no tag {tag_name!r}, so nothing would be ignored. "
-                                   f"Its tags: {', '.join(sorted(tags)) or 'none'}")
             ignore_tag = tags[tag_name.lower()]
             print(f"Ignoring {things} tagged {tag_name!r}")
         roots = root_folders(arr)
