@@ -9,7 +9,7 @@ library is searched in turn, however slowly; ones added since are just part of t
 
 How many it searches a run has to be set, for each Sonarr or Radarr (<PREFIX>_UPGRADE_COUNT, 1 to 500) or for every
 one (--count): without it, that one isn't searched, rather than its whole library being searched at once and the
-indexers hammered.
+indexers hammered. It's taken as not wanted for that one: the log says it's skipped, with no Discord post.
 
 The limits, any of them together (each Sonarr or Radarr can have its own, see below):
   --tag NAME           only those with this tag (several: any of them)
@@ -781,6 +781,11 @@ def run(args, app: str, name: str | None) -> int:
         discord_report(args, title, f"**The search failed:** {discord_escape(reason)}", [], RED, [("failed", "the search failed")])
         return 1
 
+    if args.count is None and not (os.environ.get(f"{prefix}_UPGRADE_COUNT") or "").strip():
+        # (taken as not wanted for this one, so only the log says so: no Discord post, nor a failed exit code)
+        print(f"{label}: skipped: {prefix}_UPGRADE_COUNT isn't set, so it isn't searched "
+              f"(set it, 1 to {MAX_COUNT}, or give --count, to search it)")
+        return 0
     url, key = os.environ.get(prefix + "_URL"), os.environ.get(prefix + "_API_KEY", "")
     if not (url and key):
         return failed(f"no URL or API key: set {prefix}_URL and {prefix}_API_KEY (e.g. in .env)")
@@ -1085,7 +1090,7 @@ def main(argv=None) -> int:
         p.add_argument("--apply", action="store_true", help="search and tag (without it: say what it would search)")
         p.add_argument("--count", type=int, metavar="N",
                        help=f"how many {things} to search each run, 1 to {MAX_COUNT} (default: ${var}_UPGRADE_COUNT, or "
-                            f"${var}_<NAME>_UPGRADE_COUNT; one of them is needed)")
+                            f"${var}_<NAME>_UPGRADE_COUNT; one without it is skipped)")
         p.add_argument("--search-tag", metavar="TAG",
                        help=f"the tag that marks one searched (default: ${var}_UPGRADE_SEARCH_TAG, or {SEARCH_TAG})")
         p.add_argument("--tag", action="append", metavar="NAME", help=f"only {things} with this tag (again for any of several)")
