@@ -379,8 +379,17 @@ def only_change(old: str, new: str) -> tuple[str, str]:
 
 
 def letters(s: str) -> str:
-    """`s` with only its letters and digits, in lower case, for loose comparisons."""
+    """`s` with only its letters and digits, in lower case and without accents, for loose comparisons:
+    a naming format may write the title "Marnûkh" as "Marnukh"."""
+    s = "".join(map(unaccented, unicodedata.normalize("NFC", s)))
     return re.sub(r"[\W_]", "", s).casefold()
+
+
+def unaccented(c: str) -> str:
+    """The letter `c` without its accents ("û" -> "u"), but only for Latin, Greek and Cyrillic letters:
+    a Japanese mark like the one making "ト" into "ド" changes the sound, and Korean is left whole."""
+    base, *marks = unicodedata.normalize("NFD", c)
+    return base if marks and ord(base) < 0x530 and all(map(unicodedata.combining, marks)) else c
 
 
 def just_titles(text: str, titles) -> bool:
