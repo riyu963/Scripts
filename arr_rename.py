@@ -524,8 +524,9 @@ def plan(arr: Arr, kind: Kind, files: str | None = None, ignore_tag: int | None 
     if windows:  # every folder would look missing, as its path isn't split up right
         raise CouldntStart(f"the arr uses Windows paths (like {windows!r}), which aren't supported")
     taken = {fold(i["path"].rstrip("/")) for i in items}
-    ignored = [item for item in items if ignore_tag is not None and ignore_tag in item.get("tags", [])]
-    rest = [item for item in items if item not in ignored]
+    ignored, rest = [], []  # (one pass: each item goes in one pile or the other, as dev-ui's plan() does it)
+    for item in items:
+        (ignored if ignore_tag is not None and ignore_tag in item.get("tags", []) else rest).append(item)
     # (item, its parent folder, its folder name)
     todo = [(item, *posixpath.split(item["path"].rstrip("/"))) for item in (pick(rest) if pick else rest)]
     with ThreadPoolExecutor(THREADS) as pool:
