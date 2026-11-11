@@ -45,8 +45,9 @@ File names
   --tba (Sonarr only) does the same, but only for files whose episode title was "TBA" and now has
   a real title, and only when that's the only change. TBA only counts as a word of its own, with a
   space before it and a space or the file extension after it, so "FOOTBALL" has none. Less clear
-  cases, such as a new title with TBA in it ("This episode title is TBA"), are marked TBA? and,
-  like irregular folders, only renamed with --interactive.
+  cases, such as a new title with TBA in it ("This episode title is TBA") or a file that would
+  move to another season folder as well, are marked TBA?, with why, and, like irregular folders,
+  only renamed with --interactive.
 
 Irregular renames
   If the new name would lose something the current folder name has (its year, an id tag or the
@@ -212,6 +213,7 @@ class Mismatch(NamedTuple):
     unsure: tuple = ()     # --tba only: file renames that may be more than a TBA title being filled in
     ignored: tuple = ()    # differences an --ignore-... option skipped: "capitals" and/or "punctuation"
     skipped: tuple = ()    # file renames an --ignore-... option skipped: (file id, old, new, those differences)
+    why: tuple = ()        # --tba only: why each of `unsure` is, as (file id, reason) (see tba_check)
     # How many files are in the folder, if it's going to be renamed. It's the last field so it can be
     # left out when checking whether a refresh changed the plan.
     count: int = 0
@@ -409,8 +411,14 @@ def just_titles(text: str, titles) -> bool:
 
 
 def tba_kind(old: str, new: str, titles) -> str | None:
-    """What kind of change renaming the file `old` to `new` is. `titles` are the file's episode titles.
-    Only a "TBA" that's a word of its own counts (see TBA): "FOOTBALL" and "TBAx" have none.
+    """What kind of change renaming the file `old` to `new` is (see tba_check): "tba", "unsure" or None."""
+    return tba_check(old, new, titles)[0]
+
+
+def tba_check(old: str, new: str, titles) -> tuple[str | None, str]:
+    """What kind of change renaming the file `old` to `new` is, and for an unsure one why, in a few
+    words for the log and the report ("also changes season folder"). `titles` are the file's episode
+    titles. Only a "TBA" that's a word of its own counts (see TBA): "FOOTBALL" and "TBAx" have none.
 
     "tba"     It only fills in an episode title that used to be "TBA". Either putting "TBA" back in
               place of the titles in `new` gives exactly `old`, or the only change is the word
@@ -426,40 +434,52 @@ def tba_kind(old: str, new: str, titles) -> str | None:
     moved = posixpath.dirname(old) != posixpath.dirname(new)  # (a new season folder as well)
     old, new = posixpath.basename(old), posixpath.basename(new)
     if letters(old) == letters(new) or not TBA.search(old):
-        return None
+        return None, ""
     if moved:  # more than the title: the season folder's format has changed too, which is for --files
-        return "unsure"
+        return "unsure", "also changes season folder"
     if any(TBA.search(f" {t}") and t not in old for t in titles):  # " ": the title follows one in the file name
-        return "unsure"
+        return "unsure", "the new title has TBA in it"
     known = sorted({t for t in titles if t and t != "TBA"}, key=len, reverse=True)
     # every title back to "TBA" in one go, longest first, so a short title can't match inside a longer one
     back = re.sub("|".join(map(re.escape, known)), "TBA", new) if known else new
     if back == old and back != new:
-        return "tba"
+        return "tba", ""
     was, now = only_change(old, new)
     if was == "TBA" and not TBA.search(f" {now} ") and just_titles(now, titles):
-        return "tba"
-    return "unsure" if len(TBA.findall(old)) > len(TBA.findall(new)) else None
+        return "tba", ""
+    if len(TBA.findall(old)) <= len(TBA.findall(new)):
+        return None, ""
+    if not known:
+        return "unsure", "no episode titles to check against"
+    return "unsure", "the new name isn't just the episode title" if was == "TBA" else "more than the title changes"
 
 
-def tba_split(arr: Arr, series_id: int, renames) -> tuple[tuple, tuple]:
+def tba_split(arr: Arr, series_id: int, renames) -> tuple[tuple, tuple, tuple]:
     """Sort the file `renames` ((file id, old, new) each) into two groups: TBA titles being filled
-    in, and unsure ones (see tba_kind). Renames that have nothing to do with TBA are dropped. The
+    in, and unsure ones, with why each is unsure as (file id, reason) (see tba_check). Renames that
+    have nothing to do with TBA are dropped. The
     episode titles are only read when an old name has a TBA in it: the arr's rename preview only
     lists files whose name would change, so a file still waiting for its title isn't in it, and
     most series have no TBA rename at all."""
     renames = tuple(r for r in renames if TBA.search(posixpath.basename(r[1])))
     if not renames:
-        return (), ()
+        return (), (), ()
     titles: dict[int, list] = {}
     # in season and episode order, the order Sonarr uses for a file holding several episodes
     for ep in sorted(arr.get("/api/v3/episode", seriesId=series_id),
                      key=lambda e: (e.get("seasonNumber", 0), e.get("episodeNumber", 0))):
         if ep.get("episodeFileId"):
             titles.setdefault(ep["episodeFileId"], []).append(ep.get("title") or "")
-    kinds = [tba_kind(old, new, titles.get(i, [])) for i, old, new in renames]
-    return (tuple(r for r, k in zip(renames, kinds) if k == "tba"),
-            tuple(r for r, k in zip(renames, kinds) if k == "unsure"))
+    checks = [tba_check(old, new, titles.get(i, [])) for i, old, new in renames]
+    return (tuple(r for r, (k, _) in zip(renames, checks) if k == "tba"),
+            tuple(r for r, (k, _) in zip(renames, checks) if k == "unsure"),
+            tuple((r[0], why) for r, (k, why) in zip(renames, checks) if k == "unsure"))
+
+
+def tba_reasons(m: Mismatch, unsure=None) -> list[str]:
+    """Why `m`'s TBA? files (or just `unsure` of them) are, each reason once, in the files' order."""
+    whys = dict(m.why)
+    return list(dict.fromkeys(whys.get(i, "") for i, _, _ in (m.unsure if unsure is None else unsure)))
 
 
 def check(arr: Arr, kind: Kind, item: dict, files: str | None, taken: set, names: set,
@@ -492,19 +512,19 @@ def check(arr: Arr, kind: Kind, item: dict, files: str | None, taken: set, names
         blocker = "another series/movie in the arr already uses that folder"
     elif fold(expected) in {fold(n) for n in names if n != folder}:  # ignoring capitals, to be safe
         blocker = "a folder with that name already exists"
-    renames = unsure = ()
+    renames = unsure = why = ()
     if files or (found and not blocker):
         renames = tuple((r[kind.file_id], r["existingPath"], r["newPath"])
                         for r in arr.get("/api/v3/rename", **{kind.file_param: item["id"]}))
         if files == "tba" and not (found and not blocker) and renames:
-            renames, unsure = tba_split(arr, item["id"], renames)
+            renames, unsure, why = tba_split(arr, item["id"], renames)
     skipped = tuple((i, old, new, passed_over(old, new)) for i, old, new in renames
                     if not problems(old, new, {}, ignore_case, ignore_punctuation)[0])
     renames = tuple(r for r in renames if r[0] not in {s[0] for s in skipped})
     if not (found or renames or unsure or ignored or skipped):
         return None
     count = len(on_disk(arr, item["path"].rstrip("/"))) if found and not blocker else 0
-    return Mismatch(item, expected, found, irregular, blocker, renames, unsure, ignored, skipped, count)
+    return Mismatch(item, expected, found, irregular, blocker, renames, unsure, ignored, skipped, why, count)
 
 
 def root_folders(arr: Arr) -> set:
@@ -1040,8 +1060,13 @@ def run(args, name: str | None, modes: str) -> int:
                                                        loses if args.force else "", limit)))
         unsure = () if took_unsure else m.unsure
         if held or unsure:
-            why = ", ".join((["IRREGULAR"] if held else []) + (["TBA?"] if unsure else []))
-            groups = [(label, pairs(m.files) if held else []), ("Interaction needed:", pairs(unsure))]
+            reasons = tba_reasons(m, unsure)  # (the entry's title says why, and each reason's files are grouped)
+            tba = f"TBA? ({'; '.join(r for r in reasons if r)})" if any(reasons) else "TBA?"
+            why = ", ".join((["IRREGULAR"] if held else []) + ([tba] if unsure else []))
+            whys = dict(m.why)
+            groups = [(label, pairs(m.files) if held else [])] + [
+                (f"Interaction needed ({r}):" if r else "Interaction needed:", pairs(u for u in unsure if whys.get(u[0], "") == r))
+                for r in reasons]
             not_renamed.append((f"{title} - {why}", discord_diff(old, m.expected if held else old, groups, loses,
                                                                  limit)))
 
@@ -1061,9 +1086,11 @@ def run(args, name: str | None, modes: str) -> int:
             print(f"    IRREGULAR: {'; '.join(m.irregular)}")
         if m.problems and not m.blocker and not m.files and not m.skipped:  # renamed, but none of its files need to be
             print("    files: already named correctly")
-        for word, files in (("FILE", m.files), ("TBA?", m.unsure)):  # every file, however many, so the log has them all
-            for _, old, new in files:
-                print(f"    {word} {old}\n      -> {new}")
+        for _, old, new in m.files:  # every file, however many, so the log has them all
+            print(f"    FILE {old}\n      -> {new}")
+        whys = dict(m.why)
+        for i, old, new in m.unsure:
+            print(f"    TBA? ({whys[i]}) {old}\n      -> {new}" if whys.get(i) else f"    TBA? {old}\n      -> {new}")
         for _, old, new, why in m.skipped:
             what, options = zip(*(IGNORABLE[k] for k in why))
             print(f"    IGNORED FILE ({', '.join(options)}): only {' and '.join(what)} differ\n"
@@ -1168,8 +1195,9 @@ def run(args, name: str | None, modes: str) -> int:
                     if rename_all:
                         choice = "y"  # "all" still asks about each item's TBA? files, below
             if choice == "y" and m.unsure:  # TBA? files are always asked about, even after "all"
-                choice = ask(f"{len(m.unsure)} TBA? file(s) may not be a TBA title being filled in. "
-                             "Rename them too? [y]es / [N]o / [q]uit: ", "ynq")
+                reasons = "; ".join(r for r in tba_reasons(m) if r)
+                choice = ask(f"{len(m.unsure)} TBA? file(s) may not be a TBA title being filled in"
+                             f"{f' ({reasons})' if reasons else ''}. Rename them too? [y]es / [N]o / [q]uit: ", "ynq")
                 took_unsure = choice == "y"
                 if choice == "n" and (folder or m.files):
                     choice = "y"  # no to the TBA? files, but still rename the rest
