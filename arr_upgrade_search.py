@@ -613,7 +613,11 @@ class Library:
         with "imported" (its quality and score as it came in); not imported, each with "why"; still pending)."""
         if not pending:
             return [], [], []
-        since = datetime.datetime.fromtimestamp(min(p["t"] for p in pending) - 60, datetime.timezone.utc)
+        # from a minute before the earliest grab's search, by the arr's own clock (its "since", as search() stores it),
+        # as the history is; this machine's clock may differ. (One from an older state file, without it: this machine's.)
+        starts = [t if (t := when(p.get("since"))) and t.tzinfo else datetime.datetime.fromtimestamp(p["t"], datetime.timezone.utc)
+                  for p in pending]
+        since = min(starts) - datetime.timedelta(seconds=60)
         date = since.replace(microsecond=0).isoformat().replace("+00:00", "Z")
         found: dict[str, dict[str, list[dict]]] = {}
         for event in ("downloadFolderImported", "downloadFailed"):

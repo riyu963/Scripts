@@ -419,13 +419,16 @@ def tba_kind(old: str, new: str, titles) -> str | None:
     "unsure"  It looks TBA-related but isn't clear-cut: a new title contains "TBA" (like "This
               episode title is TBA"), a "TBA" disappears some other way
               ("Mask. TBA Again" -> "Mask. Again"), more than the title changes ("TBA" -> "Pilot
-              [WEBDL-1080p]"; naming format changes are for --files), or there are no titles to
-              check against.
+              [WEBDL-1080p]", or the file moves to another season folder; naming format changes
+              are for --files), or there are no titles to check against.
     None      It has nothing to do with TBA (`old` has no "TBA"), or only capitals and punctuation
               change ("TBA" -> "Tba", "episode title" -> "Episode Title!")."""
+    moved = posixpath.dirname(old) != posixpath.dirname(new)  # (a new season folder as well)
     old, new = posixpath.basename(old), posixpath.basename(new)
     if letters(old) == letters(new) or not TBA.search(old):
         return None
+    if moved:  # more than the title: the season folder's format has changed too, which is for --files
+        return "unsure"
     if any(TBA.search(f" {t}") and t not in old for t in titles):  # " ": the title follows one in the file name
         return "unsure"
     known = sorted({t for t in titles if t and t != "TBA"}, key=len, reverse=True)
@@ -1194,8 +1197,9 @@ def run(args, name: str | None, modes: str) -> int:
             if folder:
                 ok, label = rename(arr, kind, m)
                 labels.append(label)
-                if ok:  # mark the new path as taken, so no later item can be renamed onto it
+                if ok:  # the new path is taken now, so no later item can be renamed onto it; the old one is free
                     taken.add(fold(posixpath.join(posixpath.dirname(item["path"].rstrip("/")), m.expected)))
+                    taken.discard(fold(item["path"].rstrip("/")))
                     done[0] += 1
                     done[1] += m.count
             todo = m.files + (m.unsure if took_unsure else ())
