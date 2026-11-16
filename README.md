@@ -40,7 +40,7 @@ Rather than renaming everything that needs it in one go, each run can check the 
 
 - Once N have been renamed, the rest that need renaming are listed as `LATER` and left alone; the arr isn't even asked to refresh them.
 - No tag is needed. The ones renamed now match, so the next run finds nothing to do for them and goes on to the rest, until none are left.
-- Irregular folders and `TBA?` files left for `-i`, and those that can't be renamed or are ignored, don't count towards N and are never `LATER`: they're listed as usual every run, so they can't hold up the others.
+- Irregular folders and `TBA?` and `CHANGED` files left for `-i`, and those that can't be renamed or are ignored, don't count towards N and are never `LATER`: they're listed as usual every run, so they can't hold up the others.
 - A dry run stops at the same point, so it shows exactly what `--apply` would do.
 - The summary and the Discord post end with how far it got. The counts above it are what this run renamed, as in any run, then the limit and what's left for the next runs (only renames they'll do, not ones waiting for `-i`):
 
@@ -66,7 +66,9 @@ Rather than renaming everything that needs it in one go, each run can check the 
 ./arr_rename.py radarr --apply --files --max-renames 10   # at most 10 movies this run, the rest next runs
 ```
 
-Renames that would lose information (a year, an id tag, the title) are marked **IRREGULAR** and only done with `-i` or `--force`. Everything printed is also saved to `logs/arr_rename.log`, with the command line (but not an API key or webhook URL given on it).
+Renames that would lose information (a year, an id tag, the title) are marked **IRREGULAR** and only done with `-i` or `--force`.
+
+With `--parse`, each file rename is also read by the arr's own parser (`/api/v3/parse`), so it works with any naming format. If the old and new names have a different quality, release group, language, episode (Sonarr) or edition (Radarr), the arr's record of the file has changed since it was named (another release, a re-import, an edit), so the file is marked **CHANGED**, with what changes (`CHANGED (also changes quality HDTV-1080p -> HDTV-720p; group ASW -> Kitsune)`), and like a `TBA?` file it's only renamed with `-i` or `--apply --force`. If the item's folder is being renamed too, the whole item waits as **IRREGULAR** (`1 of its files changes more than the title (quality, group)`). Only what both names have is compared (the parser guesses a quality from the extension when a name has none), so a naming format change that adds or drops a part isn't held, and a name the arr can't parse isn't either. Without `--parse` the parser is never asked. Everything printed is also saved to `logs/arr_rename.log`, with the command line (but not an API key or webhook URL given on it).
 
 ## Options
 
@@ -78,9 +80,10 @@ Renames that would lose information (a year, an id tag, the title) are marked **
 | `--api-key KEY` | Arr API key (default: `SONARR_API_KEY` / `RADARR_API_KEY`) |
 | `--apply` | Do every rename except irregular ones (default is a dry run) |
 | `-i`, `--interactive` | Ask about each rename: yes / no / all / quit |
-| `--force` | With `--apply`, also do irregular and `TBA?` renames |
+| `--force` | With `--apply`, also do irregular, `TBA?` and `CHANGED` renames |
 | `--files` | Also rename files of items whose folder is fine |
 | `--tba` | Sonarr only: like `--files`, but only files whose "TBA" episode title now has a real one |
+| `--parse` | Read each file rename with the arr's parser and hold back those that change more than the title (quality, group, language, episode, edition) for `-i`; off by default |
 | `--ignore-case` | Skip folders and files that only differ in capitals |
 | `--ignore-punctuation` | Skip folders and files that only differ in special characters |
 | `--ignore-tag TAG` | Leave items with this tag alone (default: `SONARR_IGNORE_TAG` / `RADARR_IGNORE_TAG`). A run (a dry run too) makes it if the arr hasn't got it; it can only have letters, digits and `-` |

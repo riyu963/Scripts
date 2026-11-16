@@ -48,6 +48,17 @@ File names
   cases, such as a new title with TBA in it ("This episode title is TBA") or a file that would
   move to another season folder as well, are marked TBA?, with why, and, like irregular folders,
   only renamed with --interactive.
+  --parse also checks each file rename for changing more than the title: the arr's own
+  parser (/api/v3/parse) reads the old and the new name, and if they have a different quality,
+  release group, language, episode (Sonarr) or edition (Radarr), the arr's record of the file has
+  changed since it was named (another release, a re-import or an edit). Such a file is marked
+  CHANGED, with what changes (CHANGED (also changes quality HDTV-1080p -> HDTV-720p; group ASW ->
+  Kitsune)), and, like a TBA? file, only renamed with --interactive (or --apply --force). If the
+  item's folder is being renamed too, the whole item waits, folder and files, as an irregular
+  folder does ("1 of its files changes more than the title (quality, group)"). As the arr reads
+  the names, any naming format works; only something both names have is compared, so a naming
+  format change that adds or drops a part isn't held. A name the arr can't parse isn't held.
+  Without --parse the parser isn't asked at all.
 
 Irregular renames
   If the new name would lose something the current folder name has (its year, an id tag or the
@@ -57,7 +68,7 @@ Irregular renames
 Options
   By default this is a dry run: nothing is changed. --apply does every rename, and --interactive
   asks you about each one. --apply --force also does the renames that would otherwise need
-  --interactive and marks them FORCED. Folders that can't be renamed, 
+  --interactive (irregular folders, and TBA? and CHANGED files) and marks them FORCED. Folders that can't be renamed, 
   for example because their new name is already taken, are still skipped.
   Series and movies with the ignore tag are left alone. A run (a dry run too) makes the tag if the
   arr hasn't got it; it can only have letters, digits and -.
@@ -82,7 +93,7 @@ Rename limit
   Rename at most N series or movies, with SONARR_RENAME_MAX / RADARR_RENAME_MAX (or --max-renames N): 
   once N have been renamed, the rest that need renaming are listed as LATER and left alone. No tag is needed: the ones
   renamed now match, so the next run finds nothing to do for them and goes on to the rest.
-  Irregular folders and TBA? files left for --interactive, and those that can't be renamed or are
+  Irregular folders and TBA? and CHANGED files left for --interactive, and those that can't be renamed or are
   ignored, don't count towards N and are never LATER: they're listed as usual every run. A dry run stops at the same
   point, so it shows what --apply would do. The summary and the Discord post say how far it got,
   e.g. "Rename limit 10 - 25 more to rename in 3 runs". 
@@ -210,10 +221,12 @@ class Mismatch(NamedTuple):
     irregular: list[str]   # what the new name would lose from the current one; --apply never does these
     blocker: str | None    # why the folder can't be renamed, if it can't
     files: tuple = ()      # files to rename, as (file id, old name, new name), relative to the folder
-    unsure: tuple = ()     # --tba only: file renames that may be more than a TBA title being filled in
+    unsure: tuple = ()     # file renames held for --interactive: --tba's TBA? ones, --parse's CHANGED ones
     ignored: tuple = ()    # differences an --ignore-... option skipped: "capitals" and/or "punctuation"
     skipped: tuple = ()    # file renames an --ignore-... option skipped: (file id, old, new, those differences)
-    why: tuple = ()        # --tba only: why each of `unsure` is, as (file id, reason) (see tba_check)
+    why: tuple = ()        # why each of `unsure` is held, as (file id, reason) (see tba_check and hold_changed)
+    changed: tuple = ()    # --parse only: file renames that change more than the title, as (file id, what else
+                           # changes) (see file_changes)
     # How many files are in the folder, if it's going to be renamed. It's the last field so it can be
     # left out when checking whether a refresh changed the plan.
     count: int = 0
@@ -482,8 +495,120 @@ def tba_reasons(m: Mismatch, unsure=None) -> list[str]:
     return list(dict.fromkeys(whys.get(i, "") for i, _, _ in (m.unsure if unsure is None else unsure)))
 
 
+# What a file name can tell about where a release came from (the arr's quality source), as words in the name.
+# The arr's parser always gives a source and a resolution, guessing them when the name has none (a plain
+# "Show - S01E01 - Title.mkv" comes back as HDTV-720p, from the extension), so file_changes only compares
+# the ones the name really has.
+SOURCE_WORDS = {"hdtv", "sdtv", "pdtv", "dsr", "tvrip", "web", "webdl", "webrip", "bluray", "bdrip", "brrip",
+                "remux", "dvd", "dvdrip", "rawhd", "cam", "telesync", "telecine", "workprint", "dvdscr", "screener"}
+
+
+def written(name: str) -> dict:
+    """The words of the file `name` (in lower case, split at anything but letters and digits), and the
+    source words it has, joining "web-dl", "blu-ray" and "raw-hd" as the arr writes them."""
+    low = name.lower()
+    words = set(re.split(r"[^a-z0-9]+", low)) | {w.replace("-", "") for w in ("web-dl", "blu-ray", "raw-hd") if w in low}
+    return {"words": words, "sources": words & SOURCE_WORDS}
+
+
+def parsed(arr: Arr, kind: Kind, name: str) -> dict | None:
+    """What the arr's parser reads from the file `name` (its /parse endpoint): only what the name really has
+    (see SOURCE_WORDS), as {"quality": its name (HDTV-1080p), "resolution", "source", "group", "languages",
+    "episodes" (Sonarr: S01E04, or the absolute numbers or air date), "edition" (Radarr)}, each None (or
+    empty) if the name hasn't got it. None if the arr couldn't parse the name at all."""
+    try:
+        info = (arr.get("/api/v3/parse", title=name) or {}).get(
+            "parsedEpisodeInfo" if kind.items == "series" else "parsedMovieInfo")
+    except OSError as e:
+        if isinstance(e.__cause__, urllib.error.HTTPError) and e.__cause__.code < 500:
+            return None  # refused (a name it can't read, or an arr without /parse): nothing to compare
+        raise
+    if not info:
+        return None
+    stem = posixpath.splitext(name)[0]
+    w = written(name)
+    q = (info.get("quality") or {}).get("quality") or {}
+    res = q.get("resolution") or 0
+    has_res = bool(res) and (f"{res}p" in w["words"] or res == 2160 and bool({"4k", "uhd"} & w["words"]))
+    group = info.get("releaseGroup") or ""
+    # a group counts where naming formats put it: "-GROUP" at the end, or "[GROUP]" at the start or end (anime)
+    has_group = bool(group) and re.search(rf"(?:^\[{re.escape(group)}\]|-{re.escape(group)}$|\[{re.escape(group)}\]$)",
+                                          stem, re.IGNORECASE) is not None
+    episodes = None
+    if info.get("episodeNumbers"):
+        episodes = f"S{info.get('seasonNumber', 0):02d}" + "".join(f"E{e:02d}" for e in info["episodeNumbers"])
+    elif info.get("absoluteEpisodeNumbers"):
+        episodes = "episode " + "-".join(str(e) for e in info["absoluteEpisodeNumbers"])
+    elif info.get("airDate"):
+        episodes = info["airDate"]
+    return {"quality": q.get("name"), "resolution": res if has_res else None,
+            "source": "/".join(x for x in (q.get("source"), q.get("modifier")) if x and x != "none") if w["sources"] else None,
+            "group": group if has_group else None,
+            "languages": tuple(sorted(n for n in (l.get("name") for l in info.get("languages") or []) if n and n != "Unknown")),
+            "episodes": episodes, "edition": info.get("edition") or None}
+
+
+def file_changes(arr: Arr, kind: Kind, old: str, new: str) -> tuple[str, ...]:
+    """What renaming the file `old` to `new` changes besides the title, as the arr's parser reads the two
+    names (see parsed), whatever the naming format: "quality HDTV-1080p -> HDTV-720p", "group ASW ->
+    Kitsune", "language Japanese -> English", "episode S01E04 -> S01E05", "edition Extended -> Director's
+    Cut". Only something both names have counts: one that only the new name has (or only the old one) is the
+    naming format changing, not the file. A file whose name changes like this has had its record in the arr
+    changed since it was named (another release, a re-import, an edit), so --parse holds the rename."""
+    a, b = parsed(arr, kind, posixpath.basename(old)), parsed(arr, kind, posixpath.basename(new))
+    if not (a and b):
+        return ()
+    out = []
+    if (a["resolution"] and b["resolution"] and a["resolution"] != b["resolution"]
+            or a["source"] and b["source"] and a["source"] != b["source"]):
+        out.append(f"quality {a['quality']} -> {b['quality']}")
+    for key, label in (("group", "group"), ("episodes", "episode"), ("edition", "edition")):
+        if a[key] and b[key] and a[key].casefold() != b[key].casefold():
+            out.append(f"{label} {a[key]} -> {b[key]}")
+    if a["languages"] and b["languages"] and a["languages"] != b["languages"]:
+        out.append(f"language {', '.join(a['languages'])} -> {', '.join(b['languages'])}")
+    return tuple(out)
+
+
+CHANGED = "also changes "  # how the why of a file held for changing more than its title starts (see hold_changed)
+
+
+def hold_changed(m: Mismatch | None) -> Mismatch | None:
+    """`m` with the file renames that change more than the title (see file_changes) held back like TBA? ones: moved
+    to `unsure`, so only --interactive (or --apply --force) renames them, with what else changes as their why
+    ("also changes quality HDTV-1080p -> HDTV-720p; group ASW -> Kitsune"). If the item's folder is being renamed
+    too, the whole item waits: it's made irregular, so neither the folder nor any of its files is renamed without
+    --interactive (or --apply --force). With --parse."""
+    if not m or not m.changed:
+        return m
+    changed = dict(m.changed)
+    held = tuple(f for f in m.files if f[0] in changed)
+    m = m._replace(files=tuple(f for f in m.files if f[0] not in changed), unsure=m.unsure + held,
+                   why=m.why + tuple((f[0], CHANGED + "; ".join(changed[f[0]])) for f in held))
+    if held and m.problems and not m.blocker:  # its folder is renamed too: the whole item waits, as an irregular folder
+        what = ", ".join(dict.fromkeys(c.split(" ", 1)[0] for f in held for c in changed[f[0]]))
+        m = m._replace(irregular=m.irregular + [f"{len(held)} of its files change{'s' if len(held) == 1 else ''} "
+                                                f"more than the title ({what})"])
+    return m
+
+
+def held_marks(m: Mismatch, unsure=None) -> str:
+    """What `m`'s held files (or just `unsure` of them) are, as the log and the report mark them: "TBA?" (may be
+    more than a TBA title being filled in), "CHANGED" (changes more than the title, see hold_changed) or both."""
+    whys = dict(m.why)
+    return " and ".join(dict.fromkeys("CHANGED" if whys.get(i, "").startswith(CHANGED) else "TBA?"
+                                      for i, _, _ in (m.unsure if unsure is None else unsure)))
+
+
+def held_meaning(marks: str) -> str:
+    """What files marked `marks` (see held_marks) may do, for a question or a log line."""
+    return {"TBA?": "may not be a TBA title being filled in", "CHANGED": "change more than the title"}.get(
+        marks, "may change more than a TBA title")
+
+
 def check(arr: Arr, kind: Kind, item: dict, files: str | None, taken: set, names: set,
-          ignore_case: bool = False, ignore_punctuation: bool = False, roots: set | None = None) -> Mismatch | None:
+          ignore_case: bool = False, ignore_punctuation: bool = False, roots: set | None = None,
+          parse: bool = False) -> Mismatch | None:
     """What needs renaming for `item`: its folder, its files, or both. None if nothing does.
 
     `taken` holds the paths (in lower case) of every item in the arr, and `names` the folders next
@@ -496,7 +621,10 @@ def check(arr: Arr, kind: Kind, item: dict, files: str | None, taken: set, names
     With `ignore_case` / `ignore_punctuation`, a folder whose name only differs in capitals / special
     characters isn't renamed. It's still returned, with the reason in `ignored`, so the log can
     say it was skipped. File renames that only change those are skipped too, and listed in `skipped`
-    (--tba never renames for them anyway, see tba_kind)."""
+    (--tba never renames for them anyway, see tba_kind).
+
+    With `parse` (--parse), each file rename is read by the arr's parser, and those that change more than
+    the title are held back for --interactive (see file_changes and hold_changed)."""
     parent, folder = posixpath.split(item["path"].rstrip("/"))
     expected = arr.get(f"/api/v3/{kind.items}/{item['id']}/folder")["folder"]
     found, irregular = problems(folder, expected, item, ignore_case, ignore_punctuation)
@@ -524,7 +652,10 @@ def check(arr: Arr, kind: Kind, item: dict, files: str | None, taken: set, names
     if not (found or renames or unsure or ignored or skipped):
         return None
     count = len(on_disk(arr, item["path"].rstrip("/"))) if found and not blocker else 0
-    return Mismatch(item, expected, found, irregular, blocker, renames, unsure, ignored, skipped, why, count)
+    # what else the files' renames change, read by the arr's parser (two reads per file renamed, none for the rest)
+    changed = tuple((i, c) for i, old, new in renames if (c := file_changes(arr, kind, old, new))) if parse else ()
+    m = Mismatch(item, expected, found, irregular, blocker, renames, unsure, ignored, skipped, why, changed, count)
+    return hold_changed(m)
 
 
 def root_folders(arr: Arr) -> set:
@@ -533,11 +664,12 @@ def root_folders(arr: Arr) -> set:
 
 
 def plan(arr: Arr, kind: Kind, files: str | None = None, ignore_tag: int | None = None, ignore_case: bool = False,
-         ignore_punctuation: bool = False, roots: set | None = None, pick=None):
+         ignore_punctuation: bool = False, roots: set | None = None, pick=None, parse: bool = False):
     """Check every item in the arr. Returns four things: what needs renaming (a list of Mismatch),
     the items whose folder isn't on disk, the items skipped because they have the tag `ignore_tag`
     (a tag id), and the paths of every item in lower case. `roots` are the arr's root folders (see
-    check). With `pick`, only the items pick(the rest) returns are checked (see "Batched runs"). The arr is
+    check). With `pick`, only the items pick(the rest) returns are checked (see "Batched runs"). `parse`: see
+    check. The arr is
     read THREADS requests at a time; nothing is changed here, and everything comes back in the items' order."""
     items = sorted(arr.get(f"/api/v3/{kind.items}"), key=lambda i: fold(i.get("sortTitle") or i["title"]))
     windows = next((i["path"] for i in items if "\\" in i["path"] or re.match(r"[A-Za-z]:", i["path"])), None)
@@ -556,7 +688,7 @@ def plan(arr: Arr, kind: Kind, files: str | None = None, ignore_tag: int | None 
         not_on_disk = [item for item, parent, folder in todo if folder not in listings[parent]]
         present = [(item, parent) for item, parent, folder in todo if folder in listings[parent]]
         checked = pool.map(lambda t: check(arr, kind, t[0], files, taken, listings[t[1]], ignore_case,
-                                           ignore_punctuation, roots), present)
+                                           ignore_punctuation, roots, parse), present)
         mismatches = [m for m in checked if m]
     return mismatches, not_on_disk, ignored, taken
 
@@ -591,7 +723,7 @@ def gone(arr: Arr, kind: Kind, item_id: int) -> bool:
 
 
 def recheck(arr: Arr, kind: Kind, m: Mismatch, files: str | None, taken: set, ignore_case: bool = False,
-            ignore_punctuation: bool = False, roots: set | None = None) -> tuple[bool, Mismatch | None]:
+            ignore_punctuation: bool = False, roots: set | None = None, parse: bool = False) -> tuple[bool, Mismatch | None]:
     """Refresh `m`'s item in the arr and check it again. Returns whether its folder is still on
     disk, and what needs renaming now (None if nothing does). Raises Gone if the item has been
     deleted from the arr (its refresh then fails)."""
@@ -607,7 +739,7 @@ def recheck(arr: Arr, kind: Kind, m: Mismatch, files: str | None, taken: set, ig
     names = listing(arr, parent)  # read again: a rename earlier in this run may have used a name
     if folder not in names:
         return False, None
-    return True, check(arr, kind, item, files, taken, names, ignore_case, ignore_punctuation, roots)
+    return True, check(arr, kind, item, files, taken, names, ignore_case, ignore_punctuation, roots, parse)
 
 
 def wait_for(arr: Arr, name: str | None = None, command_id: int | None = None) -> str | None:
@@ -801,7 +933,12 @@ def main(argv=None) -> int:
                             "characters, like ! ' : (anything but letters, digits and spaces, outside the year and "
                             "id tags)")
         p.add_argument("--force", action="store_true",
-                       help="with --apply, also do the renames that need -i (irregular folders, TBA? files)")
+                       help="with --apply, also do the renames that need -i (irregular folders, TBA? and CHANGED files)")
+        p.add_argument("--parse", action="store_true",
+                       help="read each file rename with the arr's parser (/api/v3/parse) and hold back those that change "
+                            "more than the title (quality, release group, language, episode or edition), like TBA? ones: "
+                            "only -i or --apply --force renames them; with its folder renamed too, the whole item waits "
+                            "as irregular (default: off, the parser isn't asked)")
         p.add_argument("--ignore-tag", metavar="TAG", help=f"leave {things} with this tag alone, in every instance "
                                                             f"(default: ${var}_IGNORE_TAG, or ${var}_<NAME>_IGNORE_TAG)")
         p.add_argument("--count", type=int, metavar="N",
@@ -831,6 +968,7 @@ def main(argv=None) -> int:
     modes = ["folders"] + (["files"] if args.files else []) + (["tba"] if args.tba else [])
     modes += ["ignore case"] if args.ignore_case else []
     modes += ["ignore punctuation"] if args.ignore_punctuation else []
+    modes += ["parse"] if args.parse else []
     modes += ["force"] if args.force else []
     modes.append("apply" if args.apply else "interactive" if args.interactive else "dry run")
     modes = ", ".join(modes)
@@ -1014,7 +1152,10 @@ def run(args, name: str | None, modes: str) -> int:
             rounds["picked"] = rounds["untagged"][:count]
             return rounds["picked"]
         mismatches, not_on_disk, ignored, taken = plan(arr, kind, files_mode, ignore_tag, args.ignore_case,
-                                                       args.ignore_punctuation, roots, pick if count else None)
+                                                       args.ignore_punctuation, roots, pick if count else None,
+                                                       args.parse)
+        if args.parse:
+            print("Holding back file renames that change more than the title (they need --interactive)")
         if rounds.get("rotated"):  # every one checked: take the tag off them and start over
             print(f"Every one of the {things} has been checked: {'starting' if changing else 'a run that changes things starts'} over")
             if changing:
@@ -1038,7 +1179,7 @@ def run(args, name: str | None, modes: str) -> int:
                gone: bool = False) -> None:
         """Add `m` to the Discord report. What gets renamed goes in `renames`, with `note` after the
         title (like " - FAILED"). What's left for --interactive goes in `not_renamed`: the whole
-        item if `held` (an irregular folder that wasn't renamed), and its TBA? files unless
+        item if `held` (an irregular folder that wasn't renamed), and its TBA? and CHANGED files unless
         `took_unsure` (they were renamed). An irregular folder's entry says what the new name
         loses, both when it's held and when --force renamed it anyway. If `gone` (deleted from the
         arr mid-run), `not_renamed` gets what was planned for it, none of which was done."""
@@ -1061,8 +1202,11 @@ def run(args, name: str | None, modes: str) -> int:
         unsure = () if took_unsure else m.unsure
         if held or unsure:
             reasons = tba_reasons(m, unsure)  # (the entry's title says why, and each reason's files are grouped)
-            tba = f"TBA? ({'; '.join(r for r in reasons if r)})" if any(reasons) else "TBA?"
-            why = ", ".join((["IRREGULAR"] if held else []) + ([tba] if unsure else []))
+            tba_why = [r for r in reasons if not r.startswith(CHANGED)]
+            tba = f"TBA? ({'; '.join(r for r in tba_why if r)})" if any(tba_why) else "TBA?"
+            marks = held_marks(m, unsure) if unsure else ""
+            why = ", ".join((["IRREGULAR"] if held else []) + ([tba] if "TBA?" in marks else [])
+                            + (["CHANGED"] if "CHANGED" in marks else []))
             whys = dict(m.why)
             groups = [(label, pairs(m.files) if held else [])] + [
                 (f"Interaction needed ({r}):" if r else "Interaction needed:", pairs(u for u in unsure if whys.get(u[0], "") == r))
@@ -1090,13 +1234,15 @@ def run(args, name: str | None, modes: str) -> int:
             print(f"    FILE {old}\n      -> {new}")
         whys = dict(m.why)
         for i, old, new in m.unsure:
-            print(f"    TBA? ({whys[i]}) {old}\n      -> {new}" if whys.get(i) else f"    TBA? {old}\n      -> {new}")
+            mark = "CHANGED" if whys.get(i, "").startswith(CHANGED) else "TBA?"
+            print(f"    {mark} ({whys[i]}) {old}\n      -> {new}" if whys.get(i) else f"    {mark} {old}\n      -> {new}")
         for _, old, new, why in m.skipped:
             what, options = zip(*(IGNORABLE[k] for k in why))
             print(f"    IGNORED FILE ({', '.join(options)}): only {' and '.join(what)} differ\n"
                   f"      {old}\n      -> {new}")
         if m.unsure:
-            print(f"    TBA?: {len(m.unsure)} may not be a TBA title being filled in, so they need -i")
+            marks = held_marks(m)
+            print(f"    {marks}: {len(m.unsure)} {held_meaning(marks)}, so they need -i")
 
     def to_do(m: Mismatch) -> bool:
         """Whether `m` needs anything done: its folder or files renamed. (It may only be listed, as
@@ -1142,7 +1288,8 @@ def run(args, name: str | None, modes: str) -> int:
             last_done = None
         print("    refreshing the arr's metadata to check it still needs renaming")
         try:
-            present, fresh = recheck(arr, kind, m, files_mode, taken, args.ignore_case, args.ignore_punctuation, roots)
+            present, fresh = recheck(arr, kind, m, files_mode, taken, args.ignore_case, args.ignore_punctuation, roots,
+                                     args.parse)
         except Gone:
             print(f"    GONE: deleted from {app} mid-run: skipped")
             deleted += 1
@@ -1193,14 +1340,14 @@ def run(args, name: str | None, modes: str) -> int:
                     choice = ask("Rename? [y]es / [N]o / [a]ll remaining / [q]uit: ")
                     rename_all = choice == "a"
                     if rename_all:
-                        choice = "y"  # "all" still asks about each item's TBA? files, below
-            if choice == "y" and m.unsure:  # TBA? files are always asked about, even after "all"
-                reasons = "; ".join(r for r in tba_reasons(m) if r)
-                choice = ask(f"{len(m.unsure)} TBA? file(s) may not be a TBA title being filled in"
+                        choice = "y"  # "all" still asks about each item's TBA? and CHANGED files, below
+            if choice == "y" and m.unsure:  # TBA? and CHANGED files are always asked about, even after "all"
+                reasons, marks = "; ".join(r for r in tba_reasons(m) if r), held_marks(m)
+                choice = ask(f"{len(m.unsure)} {marks} file(s) {held_meaning(marks)}"
                              f"{f' ({reasons})' if reasons else ''}. Rename them too? [y]es / [N]o / [q]uit: ", "ynq")
                 took_unsure = choice == "y"
                 if choice == "n" and (folder or m.files):
-                    choice = "y"  # no to the TBA? files, but still rename the rest
+                    choice = "y"  # no to the TBA? / CHANGED files, but still rename the rest
             if choice == "q":
                 not_reviewed = sum(map(to_do, mismatches[i - 1:]))  # this one too
                 unchecked |= {x.item["id"] for x in mismatches[i - 1:]}
@@ -1209,10 +1356,10 @@ def run(args, name: str | None, modes: str) -> int:
                 declined += 1
                 continue
         elif m.unsure and args.force:
-            print(f"    FORCED: renaming the {len(m.unsure)} TBA? file(s) anyway (--force)")
+            print(f"    FORCED: renaming the {len(m.unsure)} {held_marks(m)} file(s) anyway (--force)")
             took_unsure = True
         elif m.unsure:
-            print(f"    NOT RENAMED: {len(m.unsure)} TBA? file(s); review them with --interactive")
+            print(f"    NOT RENAMED: {len(m.unsure)} {held_marks(m)} file(s); review them with --interactive")
             needs_i += 1
             need[2] += 1
             need[3] += len(m.unsure)
@@ -1255,7 +1402,7 @@ def run(args, name: str | None, modes: str) -> int:
         # nothing was left to rename: its files were renamed some other way in the meantime
         if ok and not (folder or m.files or took_unsure):
             up_to_date += 1
-            change(m, folder)  # only adds its TBA? files, if any are left for --interactive
+            change(m, folder)  # only adds its TBA? and CHANGED files, if any are left for --interactive
             continue
         label = ", ".join(dict.fromkeys(label for label in labels if label))
         change(m, folder, f" - {label}" if label else "", took_unsure)
@@ -1368,7 +1515,7 @@ def run(args, name: str | None, modes: str) -> int:
         print("Dry run: nothing changed. Re-run with --apply (or --interactive).")
     if args.discord_webhook:
         color = RED if stopped else GREEN if renamed else BLUE
-        # renames that only an --interactive run will do: irregular folders and TBA? files
+        # renames that only an --interactive run will do: irregular folders, and TBA? and CHANGED files
         need_i = needs_i if changing else sum(bool(m.irregular and not m.blocker or m.unsure) for m in now)
         # reasons to ping you: a problem that stopped the run, renames waiting for --interactive, renames
         # --force did anyway, and items deleted from the arr mid-run
